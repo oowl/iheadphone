@@ -2,6 +2,21 @@
 
 A native Linux and macOS desktop controller for AirPods and Sony headphones.
 
+![AirPods overview: battery and wearing state for each AirPod and the case, with noise control](docs/screenshots/airpods-overview.png)
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/airpods-sound.png" alt="AirPods sound settings: press-and-hold cycle, Adaptive Audio, microphone"></td>
+    <td><img src="docs/screenshots/airpods-device.png" alt="AirPods device page: model, firmware, serial numbers, press timing and tone volume"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/sony-overview.png" alt="WH-1000XM5 overview: battery, wearing status, sound mode, codec"></td>
+    <td><img src="docs/screenshots/sony-sound.png" alt="WH-1000XM5 sound settings: noise control, ambient level, equalizer"></td>
+  </tr>
+</table>
+
+Screenshots show preview mode (`IHEADPHONE_DEMO=1`) with sample values.
+
 The desktop app uses GPUI Kit. Sony WH-1000XM5 discovery and controls use a local Bluetooth RFCOMM
 transport and a reviewed, I/O-free Sony V2 protocol crate. Initial wire layouts and captured test
 messages were adapted from the MIT-licensed [`sound-connect`](https://github.com/aecca/sound-connect)
@@ -87,7 +102,11 @@ interface switches immediately and remembers the selection across restarts. On L
 is stored under `$XDG_CONFIG_HOME/iheadphone` (or `~/.config/iheadphone`); on macOS it is stored in
 `~/Library/Application Support/iHeadphone`.
 
-For UI development, set `IHEADPHONE_OPEN_SETTINGS=1` to open directly on the settings page.
+For UI development, set `IHEADPHONE_OPEN_SETTINGS=1` to open directly on the settings page, or
+`IHEADPHONE_OPEN_DEVICE=sony|airpods` and `IHEADPHONE_OPEN_PAGE=overview|sound|device` to open a
+particular device page.
+`scripts/screenshots.sh` regenerates the README screenshots from preview mode inside isolated virtual
+KWin sessions, so nothing else on your desktop is captured.
 
 ## Verify
 
