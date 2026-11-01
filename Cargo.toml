@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "apps/desktop",
+    "crates/domain",
+    "crates/sony-protocol",
+    "crates/transport",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+version = "0.1.0"
+
+[workspace.dependencies]
+iheadphone-domain = { path = "crates/domain" }
+iheadphone-sony-protocol = { path = "crates/sony-protocol" }
+iheadphone-transport = { path = "crates/transport" }
+gpui-kit = "=0.8.1"

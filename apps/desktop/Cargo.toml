@@ -1,0 +1,15 @@
+[package]
+name = "iheadphone-desktop"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "iheadphone"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+iheadphone-domain.workspace = true
+iheadphone-sony-protocol.workspace = true
+iheadphone-transport.workspace = true

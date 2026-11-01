@@ -1,0 +1,8 @@
+[package]
+name = "iheadphone-sony-protocol"
+description = "Reviewed Sony WH-1000XM5 control protocol without platform I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
