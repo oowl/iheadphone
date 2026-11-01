@@ -1,6 +1,6 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceKind {
-    AirPodsPro2,
+    AirPods,
     SonyWh1000Xm5,
 }
 
@@ -13,21 +13,21 @@ pub enum FormFactor {
 impl DeviceKind {
     pub const fn display_name(self) -> &'static str {
         match self {
-            Self::AirPodsPro2 => "AirPods Pro 2",
+            Self::AirPods => "AirPods",
             Self::SonyWh1000Xm5 => "WH-1000XM5",
         }
     }
 
     pub const fn manufacturer(self) -> &'static str {
         match self {
-            Self::AirPodsPro2 => "Apple",
+            Self::AirPods => "Apple",
             Self::SonyWh1000Xm5 => "Sony",
         }
     }
 
     pub const fn form_factor(self) -> FormFactor {
         match self {
-            Self::AirPodsPro2 => FormFactor::TrueWireless,
+            Self::AirPods => FormFactor::TrueWireless,
             Self::SonyWh1000Xm5 => FormFactor::OverEar,
         }
     }
@@ -125,9 +125,9 @@ pub fn sony_wh1000xm5(connected: bool) -> DeviceSnapshot {
     }
 }
 
-pub fn airpods_pro2(connected: bool) -> DeviceSnapshot {
+pub fn airpods(connected: bool) -> DeviceSnapshot {
     DeviceSnapshot {
-        kind: DeviceKind::AirPodsPro2,
+        kind: DeviceKind::AirPods,
         connected,
         battery_percent: 0,
         noise_mode: NoiseMode::Off,
@@ -156,7 +156,7 @@ pub fn mock_devices() -> Vec<DeviceSnapshot> {
     let mut devices = vec![sony_wh1000xm5(true)];
 
     if cfg!(target_os = "linux") {
-        let mut airpods = airpods_pro2(true);
+        let mut airpods = airpods(true);
         airpods.battery_percent = 74;
         airpods.noise_mode = NoiseMode::Adaptive;
         airpods.conversation_awareness = true;
@@ -189,6 +189,6 @@ mod tests {
     #[test]
     fn routes_only_sony_over_ear_devices_to_the_headband_layout() {
         assert!(DeviceKind::SonyWh1000Xm5.uses_sony_over_ear_layout());
-        assert!(!DeviceKind::AirPodsPro2.uses_sony_over_ear_layout());
+        assert!(!DeviceKind::AirPods.uses_sony_over_ear_layout());
     }
 }

@@ -23,9 +23,23 @@ Pair and connect the AirPods in the system Bluetooth settings, then run the norm
 iHeadphone identifies connected Apple headphones through BlueZ and opens AAP alongside the Sony
 backend, so both device types may remain paired.
 
-The first implementation supports left, right, and case battery and charging state, in-ear state,
-ANC/Transparency/Adaptive/Off, Conversation Awareness, Automatic Ear Detection, one-AirPod noise
-cancellation, and microphone selection. These controls are exposed in the desktop UI.
+The AirPods backend supports left, right, and case battery and charging state, in-ear state,
+ANC/Transparency/Adaptive/Off, the press-and-hold mode cycle, Adaptive Audio strength, Conversation
+Awareness, Automatic Ear Detection, one-AirPod noise cancellation, microphone selection, press
+speed, press-and-hold duration, tone volume, volume swipe and its interval, and Personalized
+Volume. It also reads the model, model number, firmware, and serial numbers the AirPods report on
+connect.
+
+AirPods only detect speech for Conversation Awareness; on iOS the phone lowers the volume. On
+Linux, iHeadphone does that itself: while Conversation Awareness is on and media is playing, it
+lowers the default Bluetooth sink by 15 dB through `pactl` when you start speaking and eases it back
+as the AirPods report the conversation ending. A volume you change by hand in the meantime is left
+alone.
+
+The model is identified from the BlueZ modalias product ID and confirmed by the model number in
+the device information packet. Controls the model lacks are hidden; for example, AirPods Max get a
+single-device layout without ear detection or Adaptive. Unrecognised models keep every control.
+AirPods do not report the current press-and-hold cycle, so it shows as unset until you choose one.
 
 Set `IHEADPHONE_TRACE_AIRPODS=1` to log incoming AAP packets while diagnosing a particular model.
 
