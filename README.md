@@ -7,10 +7,27 @@ transport and a reviewed, I/O-free Sony V2 protocol crate. Initial wire layouts 
 messages were adapted from the MIT-licensed [`sound-connect`](https://github.com/aecca/sound-connect)
 project; its license notice is preserved beside the protocol source.
 
+On Linux, AirPods use a separate local Apple Accessory Protocol (AAP) implementation over the
+classic Bluetooth L2CAP channel at PSM `0x1001`. Protocol layouts were reviewed against the
+MIT/Apache-2.0 [`podctl`](https://github.com/Rockykln/podctl) implementation; iHeadphone does not
+depend on or execute podctl.
+
 ## Current scope
 
 - Linux: AirPods and Sony WH-1000XM5 control.
 - macOS: Sony WH-1000XM5 control. AirPods remain managed by macOS.
+
+## Run with real AirPods hardware on Linux
+
+Pair and connect the AirPods in the system Bluetooth settings, then run the normal desktop app.
+iHeadphone identifies connected Apple headphones through BlueZ and opens AAP alongside the Sony
+backend, so both device types may remain paired.
+
+The first implementation supports left, right, and case battery and charging state, in-ear state,
+ANC/Transparency/Adaptive/Off, Conversation Awareness, Automatic Ear Detection, one-AirPod noise
+cancellation, and microphone selection. These controls are exposed in the desktop UI.
+
+Set `IHEADPHONE_TRACE_AIRPODS=1` to log incoming AAP packets while diagnosing a particular model.
 
 ## Run with real Sony hardware
 

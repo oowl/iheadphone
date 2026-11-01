@@ -108,34 +108,42 @@ pub fn sony_wh1000xm5(connected: bool) -> DeviceSnapshot {
     }
 }
 
+pub fn airpods_pro2(connected: bool) -> DeviceSnapshot {
+    DeviceSnapshot {
+        kind: DeviceKind::AirPodsPro2,
+        connected,
+        battery_percent: 0,
+        noise_mode: NoiseMode::Off,
+        ambient_level: 10,
+        equalizer_enabled: false,
+        dsee_enabled: false,
+        conversation_awareness: false,
+        speak_to_chat: false,
+        capabilities: DeviceCapabilities {
+            noise_modes: vec![
+                NoiseMode::Off,
+                NoiseMode::NoiseCancelling,
+                NoiseMode::Transparency,
+                NoiseMode::Adaptive,
+            ],
+            ambient_level: false,
+            equalizer: false,
+            dsee: false,
+            conversation_awareness: true,
+            speak_to_chat: false,
+        },
+    }
+}
+
 pub fn mock_devices() -> Vec<DeviceSnapshot> {
     let mut devices = vec![sony_wh1000xm5(true)];
 
     if cfg!(target_os = "linux") {
-        devices.push(DeviceSnapshot {
-            kind: DeviceKind::AirPodsPro2,
-            connected: true,
-            battery_percent: 74,
-            noise_mode: NoiseMode::Adaptive,
-            ambient_level: 12,
-            equalizer_enabled: false,
-            dsee_enabled: false,
-            conversation_awareness: true,
-            speak_to_chat: false,
-            capabilities: DeviceCapabilities {
-                noise_modes: vec![
-                    NoiseMode::Off,
-                    NoiseMode::NoiseCancelling,
-                    NoiseMode::Transparency,
-                    NoiseMode::Adaptive,
-                ],
-                ambient_level: true,
-                equalizer: true,
-                dsee: false,
-                conversation_awareness: true,
-                speak_to_chat: false,
-            },
-        });
+        let mut airpods = airpods_pro2(true);
+        airpods.battery_percent = 74;
+        airpods.noise_mode = NoiseMode::Adaptive;
+        airpods.conversation_awareness = true;
+        devices.push(airpods);
     }
 
     devices

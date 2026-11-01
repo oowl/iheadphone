@@ -3140,10 +3140,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iheadphone-airpods-protocol"
+version = "0.1.0"
+dependencies = [
+ "aes",
+]
+
+[[package]]
 name = "iheadphone-desktop"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "iheadphone-airpods-protocol",
  "iheadphone-domain",
  "iheadphone-sony-protocol",
  "iheadphone-transport",
@@ -3165,11 +3173,13 @@ dependencies = [
  "async-channel",
  "bluer",
  "futures",
+ "iheadphone-airpods-protocol",
  "iheadphone-sony-protocol",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "objc2-io-bluetooth",
  "tokio",
+ "zbus",
 ]
 
 [[package]]
@@ -6554,8 +6564,10 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -8303,6 +8315,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

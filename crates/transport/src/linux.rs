@@ -14,7 +14,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::time;
 
-use crate::{Event, Request};
+use crate::{Device as DeviceKind, Event, Request};
+
+mod airpods;
+mod l2cap;
 
 const RETRY_CONNECT: [Duration; 4] = [
     Duration::from_millis(250),
@@ -27,9 +30,42 @@ const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 const TICK: Duration = Duration::from_millis(100);
 
-pub fn run(
+pub fn start(
     name_filter: Option<String>,
     requests: mpsc::Receiver<Request>,
+    events: async_channel::Sender<Event>,
+) {
+    let (sony_tx, sony_rx) = mpsc::channel();
+    let (airpods_tx, airpods_rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("headphone-requests".into())
+        .spawn(move || {
+            while let Ok(request) = requests.recv() {
+                let delivered = match request {
+                    Request::Sony(setting) => sony_tx.send(setting).is_ok(),
+                    Request::AirPods(setting) => airpods_tx.send(setting).is_ok(),
+                };
+                if !delivered {
+                    break;
+                }
+            }
+        })
+        .expect("failed to start Bluetooth request router");
+
+    let sony_events = events.clone();
+    std::thread::Builder::new()
+        .name("sony-bluetooth".into())
+        .spawn(move || run_sony(name_filter, sony_rx, sony_events))
+        .expect("failed to start Sony Bluetooth worker");
+    std::thread::Builder::new()
+        .name("airpods-bluetooth".into())
+        .spawn(move || airpods::run(airpods_rx, events))
+        .expect("failed to start AirPods Bluetooth worker");
+}
+
+fn run_sony(
+    name_filter: Option<String>,
+    requests: mpsc::Receiver<iheadphone_sony_protocol::Setting>,
     events: async_channel::Sender<Event>,
 ) {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -39,10 +75,12 @@ pub fn run(
     runtime.block_on(link(name_filter, forward(requests), events));
 }
 
-fn forward(requests: mpsc::Receiver<Request>) -> UnboundedReceiver<Request> {
+fn forward(
+    requests: mpsc::Receiver<iheadphone_sony_protocol::Setting>,
+) -> UnboundedReceiver<iheadphone_sony_protocol::Setting> {
     let (sender, receiver) = unbounded_channel();
     std::thread::Builder::new()
-        .name("headphone-requests".into())
+        .name("sony-requests".into())
         .spawn(move || {
             while let Ok(request) = requests.recv() {
                 if sender.send(request).is_err() {
@@ -56,7 +94,7 @@ fn forward(requests: mpsc::Receiver<Request>) -> UnboundedReceiver<Request> {
 
 async fn link(
     name_filter: Option<String>,
-    mut requests: UnboundedReceiver<Request>,
+    mut requests: UnboundedReceiver<iheadphone_sony_protocol::Setting>,
     events: async_channel::Sender<Event>,
 ) {
     let mut bluez = None;
@@ -80,12 +118,15 @@ async fn link(
             failures = 0;
             let _ = events
                 .send(Event::Connected {
+                    device: DeviceKind::SonyWh1000Xm5,
                     name: channel.name.clone(),
                 })
                 .await;
             let keep_running = serve(&mut channel.stream, &mut requests, &events).await;
             channel.close().await;
-            let _ = events.send(Event::Disconnected).await;
+            let _ = events
+                .send(Event::Disconnected(DeviceKind::SonyWh1000Xm5))
+                .await;
             if !keep_running {
                 return;
             }
@@ -101,7 +142,9 @@ async fn link(
             failures = failures.saturating_add(1);
             if !searching {
                 searching = true;
-                let _ = events.send(Event::Searching).await;
+                let _ = events
+                    .send(Event::Searching(DeviceKind::SonyWh1000Xm5))
+                    .await;
             }
         }
 
@@ -119,7 +162,7 @@ fn retry_delay(failures: usize) -> Duration {
 
 async fn serve(
     stream: &mut Stream,
-    requests: &mut UnboundedReceiver<Request>,
+    requests: &mut UnboundedReceiver<iheadphone_sony_protocol::Setting>,
     events: &async_channel::Sender<Event>,
 ) -> bool {
     let mut driver = SonyXm5Driver::default();
@@ -141,7 +184,7 @@ async fn serve(
                 deliver(driver.receive(&buffer[..count], Instant::now()), events).await
             }
             request = requests.recv() => match request {
-                Some(Request::Change(setting)) => deliver(driver.set(setting, Instant::now()), events).await,
+                Some(setting) => deliver(driver.set(setting, Instant::now()), events).await,
                 None => return false,
             },
             _ = tick.tick() => deliver(driver.tick(Instant::now()), events).await,
@@ -155,7 +198,7 @@ async fn deliver(output: Output, events: &async_channel::Sender<Event>) -> Vec<F
         eprintln!("bluetooth: discarded malformed Sony frame: {error:?}");
     }
     for update in output.updates {
-        let _ = events.send(Event::Update(update)).await;
+        let _ = events.send(Event::SonyUpdate(update)).await;
     }
     output.writes
 }

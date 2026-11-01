@@ -19,7 +19,7 @@ use objc2_io_bluetooth::{
     IOBluetoothSDPUUID, kBluetoothDeviceClassMajorAudio,
 };
 
-use crate::{Event, Request};
+use crate::{Device as DeviceKind, Event, Request};
 
 const RETRY_CONNECT: [Duration; 4] = [
     Duration::from_secs(3),
@@ -45,7 +45,10 @@ pub fn run(
 ) {
     let delegate = Delegate::new();
     let Some(service) = sdp_uuid(SERVICE_UUID) else {
-        let _ = events.send_blocking(Event::Unsupported("Invalid Sony service UUID".into()));
+        let _ = events.send_blocking(Event::Unsupported {
+            device: DeviceKind::SonyWh1000Xm5,
+            reason: "Invalid Sony service UUID".into(),
+        });
         return;
     };
     let mut searching = false;
@@ -56,11 +59,12 @@ pub fn run(
             searching = false;
             failures = 0;
             let _ = events.send_blocking(Event::Connected {
+                device: DeviceKind::SonyWh1000Xm5,
                 name: connection.name.clone(),
             });
             let keep_running = serve(&delegate, &mut connection, &requests, &events);
             unsafe { connection.channel.closeChannel() };
-            let _ = events.send_blocking(Event::Disconnected);
+            let _ = events.send_blocking(Event::Disconnected(DeviceKind::SonyWh1000Xm5));
             if !keep_running {
                 return;
             }
@@ -68,7 +72,7 @@ pub fn run(
             failures = failures.saturating_add(1);
             if !searching {
                 searching = true;
-                let _ = events.send_blocking(Event::Searching);
+                let _ = events.send_blocking(Event::Searching(DeviceKind::SonyWh1000Xm5));
             }
         }
 
@@ -117,7 +121,8 @@ fn serve(
         }
 
         match requests.recv_timeout(POLL) {
-            Ok(Request::Change(setting)) => deliver(channel, events, driver.set(setting, now)),
+            Ok(Request::Sony(setting)) => deliver(channel, events, driver.set(setting, now)),
+            Ok(Request::AirPods(_)) => {}
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return false,
         }
@@ -139,7 +144,7 @@ fn deliver(
         eprintln!("bluetooth: discarded malformed Sony frame: {error:?}");
     }
     for update in output.updates {
-        let _ = events.send_blocking(Event::Update(update));
+        let _ = events.send_blocking(Event::SonyUpdate(update));
     }
 }
 

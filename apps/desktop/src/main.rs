@@ -8,15 +8,24 @@ use std::sync::{Arc, OnceLock, mpsc};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::{
     App, AppContext, Bounds, Context, Entity, FontWeight, Image as GpuiImage, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, Window, WindowBounds, WindowOptions, div, img,
-    prelude::*, px, rgb, size,
+    IntoElement, ObjectFit, Render, SharedString, Window, WindowBounds, WindowOptions,
+    assets::IconName, div, img, prelude::*, px, rgb, size,
 };
-use iheadphone_domain::{DeviceKind, DeviceSnapshot, NoiseMode, mock_devices, sony_wh1000xm5};
+use iheadphone_airpods_protocol::{
+    BatteryState as AirPodsBattery, ListeningMode as AirPodsListeningMode,
+    Microphone as AirPodsMicrophone, PodState, Setting as AirPodsSetting, Side as AirPodsSide,
+    Update as AirPodsUpdate, WearingState as AirPodsWearing,
+};
+use iheadphone_domain::{
+    DeviceKind, DeviceSnapshot, NoiseMode, airpods_pro2, mock_devices, sony_wh1000xm5,
+};
 use iheadphone_sony_protocol::{
     AutoOff, ConnectedDevice, EqPreset, Equalizer, Feature, ListeningMode, NoiseButton, Setting,
     SpeakToChatEnd, Update, VoiceSensitivity, WearingStatus,
 };
-use iheadphone_transport::{Event as BluetoothEvent, Request as BluetoothRequest};
+use iheadphone_transport::{
+    Device as BluetoothDevice, Event as BluetoothEvent, Request as BluetoothRequest,
+};
 
 // Material 3 Expressive dark color roles.
 const CANVAS: u32 = 0x111014;
@@ -35,9 +44,18 @@ const ON_SECONDARY_CONTAINER: u32 = 0xdbe2f9;
 const TERTIARY_CONTAINER: u32 = 0x633b48;
 const ON_TERTIARY_CONTAINER: u32 = 0xffd9e2;
 const SUCCESS: u32 = 0xa7f0ba;
+const AIRPODS_WORN: u32 = 0x70e1a1;
+const AIRPODS_CHARGING: u32 = 0xb79cff;
+const AIRPODS_CASE: u32 = 0x88b8ff;
 const APP_ID: &str = "io.github.iheadphone.iheadphone";
 const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/iheadphone-icon.png");
+const AIRPODS_LEFT_BYTES: &[u8] = include_bytes!("../assets/airpods-left.png");
+const AIRPODS_RIGHT_BYTES: &[u8] = include_bytes!("../assets/airpods-right.png");
+const AIRPODS_CASE_BYTES: &[u8] = include_bytes!("../assets/airpods-case.png");
 static APP_ICON_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
+static AIRPODS_LEFT_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
+static AIRPODS_RIGHT_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
+static AIRPODS_CASE_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
 
 fn app_icon_image() -> Arc<GpuiImage> {
     APP_ICON_IMAGE
@@ -48,6 +66,24 @@ fn app_icon_image() -> Arc<GpuiImage> {
             ))
         })
         .clone()
+}
+
+fn embedded_png(cache: &'static OnceLock<Arc<GpuiImage>>, bytes: &'static [u8]) -> Arc<GpuiImage> {
+    cache
+        .get_or_init(|| Arc::new(GpuiImage::from_bytes(ImageFormat::Png, bytes.to_vec())))
+        .clone()
+}
+
+fn airpods_left_image() -> Arc<GpuiImage> {
+    embedded_png(&AIRPODS_LEFT_IMAGE, AIRPODS_LEFT_BYTES)
+}
+
+fn airpods_right_image() -> Arc<GpuiImage> {
+    embedded_png(&AIRPODS_RIGHT_IMAGE, AIRPODS_RIGHT_BYTES)
+}
+
+fn airpods_case_image() -> Arc<GpuiImage> {
+    embedded_png(&AIRPODS_CASE_IMAGE, AIRPODS_CASE_BYTES)
 }
 
 fn window_icon() -> Option<Arc<image::RgbaImage>> {
@@ -312,12 +348,22 @@ impl Default for SonyDetails {
     }
 }
 
+#[derive(Clone, Default)]
+struct AirPodsDetails {
+    battery: AirPodsBattery,
+    wearing: Option<AirPodsWearing>,
+    ear_detection: bool,
+    one_bud_anc: bool,
+    microphone: Option<AirPodsMicrophone>,
+}
+
 struct HeadphoneApp {
     devices: Vec<DeviceSnapshot>,
     selected: usize,
     requests: Option<mpsc::Sender<BluetoothRequest>>,
     backend_status: String,
     sony: SonyDetails,
+    airpods: AirPodsDetails,
     language: Language,
     show_settings: bool,
     #[cfg(target_os = "linux")]
@@ -332,7 +378,10 @@ impl HeadphoneApp {
             let mut sony = sony_wh1000xm5(false);
             sony.battery_percent = 0;
             sony.noise_mode = NoiseMode::Off;
-            vec![sony]
+            let mut devices = vec![sony];
+            #[cfg(target_os = "linux")]
+            devices.push(airpods_pro2(false));
+            devices
         } else {
             mock_devices()
         };
@@ -350,6 +399,10 @@ impl HeadphoneApp {
                 "Controls are running in preview mode.".into()
             },
             sony: SonyDetails::default(),
+            airpods: AirPodsDetails {
+                ear_detection: true,
+                ..AirPodsDetails::default()
+            },
             language,
             show_settings: std::env::var_os("IHEADPHONE_OPEN_SETTINGS").is_some(),
             #[cfg(target_os = "linux")]
@@ -398,47 +451,84 @@ impl HeadphoneApp {
 
     fn send_setting(&self, setting: Setting) {
         if let Some(requests) = &self.requests {
-            let _ = requests.send(BluetoothRequest::Change(setting));
+            let _ = requests.send(BluetoothRequest::Sony(setting));
         }
     }
 
+    fn send_airpods_setting(&self, setting: AirPodsSetting) {
+        if let Some(requests) = &self.requests {
+            let _ = requests.send(BluetoothRequest::AirPods(setting));
+        }
+    }
+
+    fn device_index(&self, device: BluetoothDevice) -> Option<usize> {
+        let kind = match device {
+            BluetoothDevice::SonyWh1000Xm5 => DeviceKind::SonyWh1000Xm5,
+            BluetoothDevice::AirPods => DeviceKind::AirPodsPro2,
+        };
+        self.devices.iter().position(|item| item.kind == kind)
+    }
+
     fn apply_bluetooth_event(&mut self, event: BluetoothEvent) {
-        let device = &mut self.devices[0];
         match event {
-            BluetoothEvent::Searching => {
-                device.connected = false;
-                self.sony.wearing_status = None;
-                #[cfg(target_os = "linux")]
-                if let Some(bridge) = self._media_bridge.as_mut() {
-                    bridge.clear_pause_reasons();
+            BluetoothEvent::Searching(kind) => {
+                if let Some(index) = self.device_index(kind) {
+                    self.devices[index].connected = false;
                 }
-                self.backend_status = match self.language {
-                    Language::English => "Searching for WH-1000XM5…".into(),
-                    Language::SimplifiedChinese => "正在查找 WH-1000XM5…".into(),
+                if kind == BluetoothDevice::SonyWh1000Xm5 {
+                    self.sony.wearing_status = None;
+                } else {
+                    self.airpods.wearing = None;
+                }
+                self.backend_status = match (self.language, kind) {
+                    (Language::English, BluetoothDevice::SonyWh1000Xm5) => {
+                        "Searching for WH-1000XM5…".into()
+                    }
+                    (Language::SimplifiedChinese, BluetoothDevice::SonyWh1000Xm5) => {
+                        "正在查找 WH-1000XM5…".into()
+                    }
+                    (Language::English, BluetoothDevice::AirPods) => {
+                        "Searching for connected AirPods…".into()
+                    }
+                    (Language::SimplifiedChinese, BluetoothDevice::AirPods) => {
+                        "正在查找已连接的 AirPods…".into()
+                    }
                 };
             }
-            BluetoothEvent::Disconnected => {
-                let was_connected = device.connected;
-                device.connected = false;
-                self.sony.wearing_status = None;
+            BluetoothEvent::Disconnected(kind) => {
+                let was_connected = self
+                    .device_index(kind)
+                    .is_some_and(|index| self.devices[index].connected);
+                if let Some(index) = self.device_index(kind) {
+                    self.devices[index].connected = false;
+                }
+                if kind == BluetoothDevice::SonyWh1000Xm5 {
+                    self.sony.wearing_status = None;
+                } else {
+                    self.airpods.wearing = None;
+                }
                 #[cfg(target_os = "linux")]
                 if let Some(bridge) = self._media_bridge.as_mut() {
                     bridge.clear_pause_reasons();
                 }
-                self.backend_status = match self.language {
-                    Language::English => "Searching for WH-1000XM5…".into(),
-                    Language::SimplifiedChinese => "正在查找 WH-1000XM5…".into(),
-                };
                 if was_connected {
-                    send_desktop_notification(
-                        "iHeadphone",
-                        self.t("WH-1000XM5 disconnected.", "WH-1000XM5 已断开连接。"),
-                    );
+                    let name = match kind {
+                        BluetoothDevice::SonyWh1000Xm5 => "WH-1000XM5",
+                        BluetoothDevice::AirPods => "AirPods",
+                    };
+                    let body = match self.language {
+                        Language::English => format!("{name} disconnected."),
+                        Language::SimplifiedChinese => format!("{name} 已断开连接。"),
+                    };
+                    send_desktop_notification("iHeadphone", &body);
                 }
             }
-            BluetoothEvent::Connected { name } => {
-                let newly_connected = !device.connected;
-                device.connected = true;
+            BluetoothEvent::Connected { device: kind, name } => {
+                let Some(index) = self.device_index(kind) else {
+                    return;
+                };
+                let newly_connected = !self.devices[index].connected;
+                self.devices[index].connected = true;
                 self.backend_status = match self.language {
                     Language::English => format!("{name} hardware controls are live."),
                     Language::SimplifiedChinese => format!("{name} 硬件控制已启用。"),
@@ -451,86 +541,162 @@ impl HeadphoneApp {
                     send_desktop_notification("iHeadphone", &body);
                 }
             }
-            BluetoothEvent::Unsupported(reason) => {
-                device.connected = false;
+            BluetoothEvent::Unsupported {
+                device: kind,
+                reason,
+            } => {
+                if let Some(index) = self.device_index(kind) {
+                    self.devices[index].connected = false;
+                }
                 self.backend_status = reason;
             }
-            BluetoothEvent::Update(update) => match update {
-                Update::Firmware(value) => self.sony.firmware = Some(value),
-                Update::Codec(value) => self.sony.codec = Some(value),
-                Update::Battery(battery) => {
-                    device.battery_percent = battery.level;
-                    self.sony.charging = battery.charging;
+            BluetoothEvent::SonyUpdate(update) => {
+                let Some(index) = self.device_index(BluetoothDevice::SonyWh1000Xm5) else {
+                    return;
+                };
+                let device = &mut self.devices[index];
+                match update {
+                    Update::Firmware(value) => self.sony.firmware = Some(value),
+                    Update::Codec(value) => self.sony.codec = Some(value),
+                    Update::Battery(battery) => {
+                        device.battery_percent = battery.level;
+                        self.sony.charging = battery.charging;
+                    }
+                    Update::Mode(mode) => {
+                        device.noise_mode = match mode {
+                            ListeningMode::NoiseCancelling => NoiseMode::NoiseCancelling,
+                            ListeningMode::Ambient => NoiseMode::Ambient,
+                            ListeningMode::Off => NoiseMode::Off,
+                        };
+                    }
+                    Update::AmbientLevel(level) => device.ambient_level = level.clamp(1, 20),
+                    Update::FocusOnVoice(enabled) => self.sony.focus_on_voice = enabled,
+                    Update::Feature(Feature::Dsee, enabled) => device.dsee_enabled = enabled,
+                    Update::Feature(Feature::SpeakToChat, enabled) => {
+                        device.speak_to_chat = enabled;
+                    }
+                    Update::Feature(Feature::PauseWhenTakenOff, enabled) => {
+                        self.sony.pause_when_taken_off = enabled;
+                        #[cfg(target_os = "linux")]
+                        if let (Some(bridge), Some(status)) =
+                            (self._media_bridge.as_mut(), self.sony.wearing_status)
+                        {
+                            bridge.set_taken_off_active(enabled && status.is_taken_off());
+                        }
+                    }
+                    Update::Equalizer(equalizer) => {
+                        device.equalizer_enabled = equalizer.preset != EqPreset::Off;
+                        self.sony.equalizer = Some(equalizer);
+                    }
+                    Update::AutoOff(value) => self.sony.auto_off = Some(value),
+                    Update::NoiseButton(value) => self.sony.noise_button = Some(value),
+                    Update::VoiceSensitivity(value) => self.sony.voice_sensitivity = Some(value),
+                    Update::SpeakToChatEnd(value) => self.sony.speak_to_chat_end = Some(value),
+                    Update::SpeakToChatActive(active) => {
+                        #[cfg(target_os = "linux")]
+                        if let Some(bridge) = self._media_bridge.as_mut() {
+                            bridge.set_speak_to_chat_active(active);
+                        }
+                        self.backend_status = if active {
+                            self.t(
+                                "Speak-to-Chat paused Linux media.",
+                                "说话聊天已暂停 Linux 媒体播放。",
+                            )
+                        } else {
+                            self.t("Speak-to-Chat conversation ended.", "说话聊天对话已结束。")
+                        }
+                        .into();
+                    }
+                    Update::WearingStatus(status) => {
+                        self.sony.wearing_status = Some(status);
+                        let taken_off = self.sony.pause_when_taken_off && status.is_taken_off();
+                        #[cfg(target_os = "linux")]
+                        if let Some(bridge) = self._media_bridge.as_mut() {
+                            bridge.set_taken_off_active(taken_off);
+                        }
+                        self.backend_status = if taken_off {
+                            self.t(
+                                "Headphones removed; Linux media paused.",
+                                "已摘下耳机；Linux 媒体已暂停。",
+                            )
+                        } else if status.is_taken_off() {
+                            self.t("Headphones removed.", "已摘下耳机。")
+                        } else {
+                            self.t(
+                                "Headphones are being worn; Linux media resumed.",
+                                "已佩戴耳机；Linux 媒体已恢复。",
+                            )
+                        }
+                        .into();
+                    }
+                    Update::ConnectedDevices(value) => self.sony.connected_devices = value,
                 }
-                Update::Mode(mode) => {
-                    device.noise_mode = match mode {
-                        ListeningMode::NoiseCancelling => NoiseMode::NoiseCancelling,
-                        ListeningMode::Ambient => NoiseMode::Ambient,
-                        ListeningMode::Off => NoiseMode::Off,
-                    };
-                }
-                Update::AmbientLevel(level) => device.ambient_level = level.clamp(1, 20),
-                Update::FocusOnVoice(enabled) => self.sony.focus_on_voice = enabled,
-                Update::Feature(Feature::Dsee, enabled) => device.dsee_enabled = enabled,
-                Update::Feature(Feature::SpeakToChat, enabled) => {
-                    device.speak_to_chat = enabled;
-                }
-                Update::Feature(Feature::PauseWhenTakenOff, enabled) => {
-                    self.sony.pause_when_taken_off = enabled;
-                    #[cfg(target_os = "linux")]
-                    if let (Some(bridge), Some(status)) =
-                        (self._media_bridge.as_mut(), self.sony.wearing_status)
-                    {
-                        bridge.set_taken_off_active(enabled && status.is_taken_off());
+            }
+            BluetoothEvent::AirPodsUpdate(update) => {
+                let Some(index) = self.device_index(BluetoothDevice::AirPods) else {
+                    return;
+                };
+                let device = &mut self.devices[index];
+                match update {
+                    AirPodsUpdate::Battery(battery) => {
+                        if battery.primary.is_some() {
+                            self.airpods.battery.primary = battery.primary;
+                        }
+                        if battery.left.is_some() {
+                            self.airpods.battery.left = battery.left;
+                            self.airpods.battery.left_charging = battery.left_charging;
+                        }
+                        if battery.right.is_some() {
+                            self.airpods.battery.right = battery.right;
+                            self.airpods.battery.right_charging = battery.right_charging;
+                        }
+                        if battery.case.is_some() {
+                            self.airpods.battery.case = battery.case;
+                            self.airpods.battery.case_charging = battery.case_charging;
+                        }
+                        if let Some(level) = self.airpods.battery.earbuds_percent() {
+                            device.battery_percent = level;
+                        }
+                    }
+                    AirPodsUpdate::Wearing(wearing) => {
+                        self.airpods.wearing = Some(wearing);
+                        let taken_off = self.airpods.ear_detection && !wearing.any_in_ear();
+                        #[cfg(target_os = "linux")]
+                        if let Some(bridge) = self._media_bridge.as_mut() {
+                            bridge.set_taken_off_active(taken_off);
+                        }
+                        self.backend_status = if taken_off {
+                            self.t(
+                                "AirPods removed; Linux media paused.",
+                                "已摘下 AirPods；Linux 媒体已暂停。",
+                            )
+                        } else {
+                            self.t("AirPods are being worn.", "已佩戴 AirPods。")
+                        }
+                        .into();
+                    }
+                    AirPodsUpdate::Mode(mode) => {
+                        device.noise_mode = match mode {
+                            AirPodsListeningMode::Off => NoiseMode::Off,
+                            AirPodsListeningMode::NoiseCancelling => NoiseMode::NoiseCancelling,
+                            AirPodsListeningMode::Transparency => NoiseMode::Transparency,
+                            AirPodsListeningMode::Adaptive => NoiseMode::Adaptive,
+                        };
+                    }
+                    AirPodsUpdate::ConversationAwareness(enabled) => {
+                        device.conversation_awareness = enabled;
+                    }
+                    AirPodsUpdate::EarDetection(enabled) => {
+                        self.airpods.ear_detection = enabled;
+                    }
+                    AirPodsUpdate::OneBudNoiseCancelling(enabled) => {
+                        self.airpods.one_bud_anc = enabled;
+                    }
+                    AirPodsUpdate::Microphone(microphone) => {
+                        self.airpods.microphone = Some(microphone);
                     }
                 }
-                Update::Equalizer(equalizer) => {
-                    device.equalizer_enabled = equalizer.preset != EqPreset::Off;
-                    self.sony.equalizer = Some(equalizer);
-                }
-                Update::AutoOff(value) => self.sony.auto_off = Some(value),
-                Update::NoiseButton(value) => self.sony.noise_button = Some(value),
-                Update::VoiceSensitivity(value) => self.sony.voice_sensitivity = Some(value),
-                Update::SpeakToChatEnd(value) => self.sony.speak_to_chat_end = Some(value),
-                Update::SpeakToChatActive(active) => {
-                    #[cfg(target_os = "linux")]
-                    if let Some(bridge) = self._media_bridge.as_mut() {
-                        bridge.set_speak_to_chat_active(active);
-                    }
-                    self.backend_status = if active {
-                        self.t(
-                            "Speak-to-Chat paused Linux media.",
-                            "说话聊天已暂停 Linux 媒体播放。",
-                        )
-                    } else {
-                        self.t("Speak-to-Chat conversation ended.", "说话聊天对话已结束。")
-                    }
-                    .into();
-                }
-                Update::WearingStatus(status) => {
-                    self.sony.wearing_status = Some(status);
-                    let taken_off = self.sony.pause_when_taken_off && status.is_taken_off();
-                    #[cfg(target_os = "linux")]
-                    if let Some(bridge) = self._media_bridge.as_mut() {
-                        bridge.set_taken_off_active(taken_off);
-                    }
-                    self.backend_status = if taken_off {
-                        self.t(
-                            "Headphones removed; Linux media paused.",
-                            "已摘下耳机；Linux 媒体已暂停。",
-                        )
-                    } else if status.is_taken_off() {
-                        self.t("Headphones removed.", "已摘下耳机。")
-                    } else {
-                        self.t(
-                            "Headphones are being worn; Linux media resumed.",
-                            "已佩戴耳机；Linux 媒体已恢复。",
-                        )
-                    }
-                    .into();
-                }
-                Update::ConnectedDevices(value) => self.sony.connected_devices = value,
-            },
+            }
         }
     }
 
@@ -913,7 +1079,7 @@ impl HeadphoneApp {
             .bg(rgb(CANVAS).opacity(0.46));
         for mode in device.capabilities.noise_modes.iter().copied() {
             let selected = mode == device.noise_mode;
-            let controls_hardware = device.kind == DeviceKind::SonyWh1000Xm5;
+            let device_kind = device.kind;
             modes = modes.child(
                 div()
                     .id(SharedString::from(format!("mode-{mode:?}")))
@@ -932,17 +1098,34 @@ impl HeadphoneApp {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.devices[this.selected].set_noise_mode(mode);
-                        if controls_hardware {
-                            let mode = match mode {
-                                NoiseMode::Off => Some(ListeningMode::Off),
-                                NoiseMode::NoiseCancelling => Some(ListeningMode::NoiseCancelling),
-                                NoiseMode::Ambient | NoiseMode::Transparency => {
-                                    Some(ListeningMode::Ambient)
+                        match device_kind {
+                            DeviceKind::SonyWh1000Xm5 => {
+                                let mode = match mode {
+                                    NoiseMode::Off => Some(ListeningMode::Off),
+                                    NoiseMode::NoiseCancelling => {
+                                        Some(ListeningMode::NoiseCancelling)
+                                    }
+                                    NoiseMode::Ambient | NoiseMode::Transparency => {
+                                        Some(ListeningMode::Ambient)
+                                    }
+                                    NoiseMode::Adaptive => None,
+                                };
+                                if let Some(mode) = mode {
+                                    this.send_setting(Setting::Mode(mode));
                                 }
-                                NoiseMode::Adaptive => None,
-                            };
-                            if let Some(mode) = mode {
-                                this.send_setting(Setting::Mode(mode));
+                            }
+                            DeviceKind::AirPodsPro2 => {
+                                let mode = match mode {
+                                    NoiseMode::Off => AirPodsListeningMode::Off,
+                                    NoiseMode::NoiseCancelling => {
+                                        AirPodsListeningMode::NoiseCancelling
+                                    }
+                                    NoiseMode::Transparency | NoiseMode::Ambient => {
+                                        AirPodsListeningMode::Transparency
+                                    }
+                                    NoiseMode::Adaptive => AirPodsListeningMode::Adaptive,
+                                };
+                                this.send_airpods_setting(AirPodsSetting::Mode(mode));
                             }
                         }
                         cx.notify();
@@ -1171,6 +1354,242 @@ impl HeadphoneApp {
                 "耳机实时回报的状态",
             ),
             cards,
+        )
+    }
+
+    fn airpods_hero(&self) -> impl IntoElement {
+        let (left_state, right_state) = self
+            .airpods_wearing_by_side()
+            .map_or((None, None), |(left, right)| (Some(left), Some(right)));
+
+        div()
+            .w_full()
+            .h(px(390.))
+            .rounded_3xl()
+            .overflow_hidden()
+            .bg(rgb(SURFACE_CONTAINER))
+            .p_6()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(PRIMARY))
+                                    .child(self.t("LIVE AAP STATUS", "AAP 实时状态")),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_sm()
+                                    .text_color(rgb(ON_SURFACE_VARIANT))
+                                    .child(self.t(
+                                        "Battery and wearing state at a glance",
+                                        "一眼查看电量与佩戴状态",
+                                    )),
+                            ),
+                    )
+                    .child(Self::chip(self.t("Connected", "已连接"), AIRPODS_WORN)),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .flex()
+                    .items_end()
+                    .justify_between()
+                    .child(self.airpod_status_node(
+                        self.t("Left AirPod", "左耳"),
+                        airpods_left_image(),
+                        self.airpods.battery.left,
+                        self.airpods.battery.left_charging,
+                        left_state,
+                    ))
+                    .child(self.airpods_case_node())
+                    .child(self.airpod_status_node(
+                        self.t("Right AirPod", "右耳"),
+                        airpods_right_image(),
+                        self.airpods.battery.right,
+                        self.airpods.battery.right_charging,
+                        right_state,
+                    )),
+            )
+    }
+
+    fn airpod_status_node(
+        &self,
+        label: &'static str,
+        image: Arc<GpuiImage>,
+        level: Option<u8>,
+        charging: bool,
+        state: Option<PodState>,
+    ) -> impl IntoElement {
+        let color = if charging {
+            AIRPODS_CHARGING
+        } else {
+            match state {
+                Some(PodState::InEar) => AIRPODS_WORN,
+                Some(PodState::InCase) => AIRPODS_CASE,
+                Some(PodState::OutOfEar | PodState::Unknown(_)) | None => OUTLINE,
+            }
+        };
+        let icon = if charging {
+            IconName::BatteryCharging
+        } else {
+            match state {
+                Some(PodState::InEar) => IconName::Ear,
+                Some(PodState::OutOfEar) => IconName::EarOff,
+                Some(PodState::InCase) => IconName::PackageOpen,
+                Some(PodState::Unknown(_)) | None => IconName::CircleOff,
+            }
+        };
+        let status = if charging {
+            match state {
+                Some(PodState::InCase) => self.t("In case · Charging", "盒中 · 充电中"),
+                _ => self.t("Charging", "充电中"),
+            }
+        } else {
+            state.map_or(
+                self.t("Reading status…", "正在读取状态…"),
+                |state| self.pod_state_label(state),
+            )
+        };
+
+        div()
+            .w(px(210.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .relative()
+                    .size(px(178.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(color).opacity(0.78))
+                    .bg(rgb(CANVAS).opacity(0.26))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(img(image).size(px(158.)).object_fit(ObjectFit::Contain))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(4.))
+                            .size(px(42.))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(rgb(SURFACE_CONTAINER))
+                            .bg(rgb(color))
+                            .text_color(rgb(CANVAS))
+                            .text_lg()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon),
+                    ),
+            )
+            .child(div().mt_2().font_weight(FontWeight::SEMIBOLD).child(label))
+            .child(
+                div()
+                    .mt_1()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(color))
+                    .child(status),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_2xl()
+                    .font_weight(FontWeight::BOLD)
+                    .child(level.map_or_else(|| "—".into(), |level| format!("{level}%"))),
+            )
+    }
+
+    fn airpods_case_node(&self) -> impl IntoElement {
+        let level = self.airpods.battery.case;
+        let color = if self.airpods.battery.case_charging {
+            AIRPODS_CHARGING
+        } else {
+            AIRPODS_CASE
+        };
+        div()
+            .w(px(250.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                img(airpods_case_image())
+                    .size(px(220.))
+                    .object_fit(ObjectFit::Contain),
+            )
+            .child(
+                div()
+                    .mt_neg_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_full()
+                    .bg(rgb(color).opacity(0.14))
+                    .text_color(rgb(color))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(IconName::Battery)
+                    .child(self.t("Case", "充电盒"))
+                    .child(level.map_or_else(|| "—".into(), |level| format!("{level}%"))),
+            )
+    }
+
+    fn airpods_wearing_by_side(&self) -> Option<(PodState, PodState)> {
+        let wearing = self.airpods.wearing?;
+        match self.airpods.battery.primary? {
+            AirPodsSide::Left => Some((wearing.primary, wearing.secondary)),
+            AirPodsSide::Right => Some((wearing.secondary, wearing.primary)),
+        }
+    }
+
+    fn pod_state_label(&self, state: PodState) -> &'static str {
+        match state {
+            PodState::InEar => self.t("In ear", "已佩戴"),
+            PodState::OutOfEar => self.t("Out of ear", "已摘下"),
+            PodState::InCase => self.t("In case", "盒中"),
+            PodState::Unknown(_) => self.t("Unknown", "未知"),
+        }
+    }
+
+    fn airpods_settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let options = [
+            (AirPodsMicrophone::Automatic, self.t("Automatic", "自动")),
+            (AirPodsMicrophone::Left, self.t("Always left", "始终左耳")),
+            (AirPodsMicrophone::Right, self.t("Always right", "始终右耳")),
+        ];
+        let mut controls = div().flex().flex_wrap().gap_2().mt_5();
+        for (microphone, label) in options {
+            controls = controls.child(Self::choice_button(
+                SharedString::from(format!("airpods-microphone-{microphone:?}")),
+                SharedString::from(label),
+                self.airpods.microphone == Some(microphone),
+                move |this| {
+                    this.airpods.microphone = Some(microphone);
+                    this.send_airpods_setting(AirPodsSetting::Microphone(microphone));
+                },
+                cx,
+            ));
+        }
+        self.panel(
+            self.t("Microphone", "麦克风"),
+            self.t(
+                "Choose which AirPod provides microphone input",
+                "选择由哪只 AirPods 提供麦克风输入",
+            ),
+            controls,
         )
     }
 
@@ -1691,8 +2110,41 @@ impl Render for HeadphoneApp {
                 self.t("Lower media when you speak", "说话时降低媒体音量"),
                 device.conversation_awareness,
                 move |this| {
-                    this.devices[selected].conversation_awareness =
-                        !this.devices[selected].conversation_awareness
+                    let enabled = !this.devices[selected].conversation_awareness;
+                    this.devices[selected].conversation_awareness = enabled;
+                    if this.devices[selected].kind == DeviceKind::AirPodsPro2 {
+                        this.send_airpods_setting(AirPodsSetting::ConversationAwareness(enabled));
+                    }
+                },
+                cx,
+            ));
+        }
+        if device.kind == DeviceKind::AirPodsPro2 {
+            features = features.child(self.feature_card(
+                self.t("Automatic ear detection", "自动入耳检测"),
+                self.t(
+                    "Pause when both AirPods are removed",
+                    "摘下两只 AirPods 时暂停",
+                ),
+                self.airpods.ear_detection,
+                |this| {
+                    let enabled = !this.airpods.ear_detection;
+                    this.airpods.ear_detection = enabled;
+                    this.send_airpods_setting(AirPodsSetting::EarDetection(enabled));
+                },
+                cx,
+            ));
+            features = features.child(self.feature_card(
+                self.t("Noise cancellation with one AirPod", "单只 AirPods 降噪"),
+                self.t(
+                    "Allow ANC while wearing one earbud",
+                    "仅佩戴一只耳机时也允许降噪",
+                ),
+                self.airpods.one_bud_anc,
+                |this| {
+                    let enabled = !this.airpods.one_bud_anc;
+                    this.airpods.one_bud_anc = enabled;
+                    this.send_airpods_setting(AirPodsSetting::OneBudNoiseCancelling(enabled));
                 },
                 cx,
             ));
@@ -1715,7 +2167,12 @@ impl Render for HeadphoneApp {
                         .overflow_y_scrollbar()
                         .p_7()
                         .child(self.app_header(&device))
-                        .child(self.hero(&device))
+                        .when(device.kind == DeviceKind::SonyWh1000Xm5, |content| {
+                            content.child(self.hero(&device))
+                        })
+                        .when(device.kind == DeviceKind::AirPodsPro2, |content| {
+                            content.child(self.airpods_hero())
+                        })
                         .child(
                             div()
                                 .flex()
@@ -1741,6 +2198,9 @@ impl Render for HeadphoneApp {
                                 )
                                 .child(div().mt_3().child(self.power_off_panel(cx)))
                         })
+                        .when(device.kind == DeviceKind::AirPodsPro2, |content| {
+                            content.child(div().mt_3().child(self.airpods_settings_panel(cx)))
+                        })
                         .child(
                             div()
                                 .mt_4()
@@ -1748,10 +2208,16 @@ impl Render for HeadphoneApp {
                                 .text_sm()
                                 .text_color(rgb(ON_SURFACE_VARIANT))
                                 .child(if self.requests.is_some() {
-                                    self.t(
-                                        "Sony XM5 hardware transport · RFCOMM",
-                                        "Sony XM5 硬件传输 · RFCOMM",
-                                    )
+                                    match device.kind {
+                                        DeviceKind::SonyWh1000Xm5 => self.t(
+                                            "Sony XM5 hardware transport · RFCOMM",
+                                            "Sony XM5 硬件传输 · RFCOMM",
+                                        ),
+                                        DeviceKind::AirPodsPro2 => self.t(
+                                            "AirPods hardware transport · Apple AAP over L2CAP",
+                                            "AirPods 硬件传输 · 基于 L2CAP 的 Apple AAP",
+                                        ),
+                                    }
                                 } else {
                                     self.t(
                                         "Preview build · hardware transport is mocked",
@@ -1822,15 +2288,18 @@ mod tests {
         let mut app = HeadphoneApp::new(Some(requests));
 
         app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::SonyWh1000Xm5,
             name: "WH-1000XM5".into(),
         });
-        app.apply_bluetooth_event(BluetoothEvent::Update(Update::Battery(Battery {
+        app.apply_bluetooth_event(BluetoothEvent::SonyUpdate(Update::Battery(Battery {
             level: 63,
             charging: false,
         })));
-        app.apply_bluetooth_event(BluetoothEvent::Update(Update::Mode(ListeningMode::Ambient)));
-        app.apply_bluetooth_event(BluetoothEvent::Update(Update::AmbientLevel(14)));
-        app.apply_bluetooth_event(BluetoothEvent::Update(Update::Feature(
+        app.apply_bluetooth_event(BluetoothEvent::SonyUpdate(Update::Mode(
+            ListeningMode::Ambient,
+        )));
+        app.apply_bluetooth_event(BluetoothEvent::SonyUpdate(Update::AmbientLevel(14)));
+        app.apply_bluetooth_event(BluetoothEvent::SonyUpdate(Update::Feature(
             Feature::Dsee,
             false,
         )));
@@ -1852,8 +2321,59 @@ mod tests {
 
         assert_eq!(
             receiver.try_recv(),
-            Ok(BluetoothRequest::Change(Setting::Mode(
+            Ok(BluetoothRequest::Sony(Setting::Mode(
                 ListeningMode::NoiseCancelling
+            )))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn applies_airpods_hardware_events_and_forwards_modes() {
+        let (requests, receiver) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+
+        app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::AirPods,
+            name: "AirPods Pro".into(),
+        });
+        app.apply_bluetooth_event(BluetoothEvent::AirPodsUpdate(AirPodsUpdate::Battery(
+            AirPodsBattery {
+                primary: Some(AirPodsSide::Left),
+                left: Some(80),
+                right: Some(60),
+                case: Some(42),
+                ..AirPodsBattery::default()
+            },
+        )));
+        app.apply_bluetooth_event(BluetoothEvent::AirPodsUpdate(AirPodsUpdate::Mode(
+            AirPodsListeningMode::Adaptive,
+        )));
+        app.apply_bluetooth_event(BluetoothEvent::AirPodsUpdate(AirPodsUpdate::Wearing(
+            AirPodsWearing {
+                primary: PodState::InCase,
+                secondary: PodState::InEar,
+            },
+        )));
+
+        let airpods = app
+            .devices
+            .iter()
+            .find(|device| device.kind == DeviceKind::AirPodsPro2)
+            .unwrap();
+        assert!(airpods.connected);
+        assert_eq!(airpods.battery_percent, 70);
+        assert_eq!(airpods.noise_mode, NoiseMode::Adaptive);
+        assert_eq!(
+            app.airpods_wearing_by_side(),
+            Some((PodState::InCase, PodState::InEar))
+        );
+
+        app.send_airpods_setting(AirPodsSetting::Mode(AirPodsListeningMode::Transparency));
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(BluetoothRequest::AirPods(AirPodsSetting::Mode(
+                AirPodsListeningMode::Transparency
             )))
         );
     }

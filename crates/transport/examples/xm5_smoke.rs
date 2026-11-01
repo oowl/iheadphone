@@ -14,7 +14,7 @@ fn wait_for_dsee(
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match events.try_recv() {
-            Ok(Event::Update(Update::Feature(Feature::Dsee, enabled)))
+            Ok(Event::SonyUpdate(Update::Feature(Feature::Dsee, enabled)))
                 if expected.is_none_or(|expected| expected == enabled) =>
             {
                 return Some(enabled);
@@ -35,13 +35,13 @@ fn main() {
     let changed = !original;
 
     link.requests
-        .send(Request::Change(Setting::Feature(Feature::Dsee, changed)))
+        .send(Request::Sony(Setting::Feature(Feature::Dsee, changed)))
         .expect("Bluetooth worker stopped before the change");
     wait_for_dsee(&link.events, Some(changed), Duration::from_secs(5))
         .expect("XM5 did not confirm the temporary DSEE change");
 
     link.requests
-        .send(Request::Change(Setting::Feature(Feature::Dsee, original)))
+        .send(Request::Sony(Setting::Feature(Feature::Dsee, original)))
         .expect("Bluetooth worker stopped before restoring DSEE");
     wait_for_dsee(&link.events, Some(original), Duration::from_secs(5))
         .expect("XM5 did not confirm DSEE was restored");

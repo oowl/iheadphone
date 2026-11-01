@@ -1,8 +1,9 @@
-//! Keeps a platform RFCOMM link to a Sony WH-1000XM5 on a background thread.
+//! Keeps platform Bluetooth control links to supported headphones.
 
 use std::sync::mpsc;
 
-use iheadphone_sony_protocol::{Setting, Update};
+use iheadphone_airpods_protocol::{Setting as AirPodsSetting, Update as AirPodsUpdate};
+use iheadphone_sony_protocol::{Setting as SonySetting, Update as SonyUpdate};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -11,18 +12,26 @@ mod macos;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod unsupported;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Device {
+    SonyWh1000Xm5,
+    AirPods,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Searching,
-    Connected { name: String },
-    Update(Update),
-    Disconnected,
-    Unsupported(String),
+    Searching(Device),
+    Connected { device: Device, name: String },
+    SonyUpdate(SonyUpdate),
+    AirPodsUpdate(AirPodsUpdate),
+    Disconnected(Device),
+    Unsupported { device: Device, reason: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    Change(Setting),
+    Sony(SonySetting),
+    AirPods(AirPodsSetting),
 }
 
 pub struct Link {
@@ -33,19 +42,26 @@ pub struct Link {
 pub fn start(name_filter: Option<String>) -> Link {
     let (request_tx, request_rx) = mpsc::channel();
     let (event_tx, events) = async_channel::unbounded();
-    std::thread::Builder::new()
-        .name("headphone-bluetooth".into())
-        .spawn(move || {
-            #[cfg(target_os = "linux")]
-            linux::run(name_filter, request_rx, event_tx);
-            #[cfg(target_os = "macos")]
-            macos::run(name_filter, request_rx, event_tx);
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            unsupported::run(name_filter, request_rx, event_tx);
-        })
-        .expect("failed to start Bluetooth worker");
+    #[cfg(target_os = "linux")]
+    linux::start(name_filter, request_rx, event_tx);
+    #[cfg(target_os = "macos")]
+    spawn_worker("headphone-bluetooth", move || {
+        macos::run(name_filter, request_rx, event_tx);
+    });
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    spawn_worker("headphone-bluetooth", move || {
+        unsupported::run(name_filter, request_rx, event_tx);
+    });
     Link {
         requests: request_tx,
         events,
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_worker(name: &str, worker: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(worker)
+        .expect("failed to start Bluetooth worker");
 }
