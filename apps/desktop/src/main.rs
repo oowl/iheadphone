@@ -672,6 +672,12 @@ impl HeadphoneApp {
         &self.devices[self.selected]
     }
 
+    /// The name without a variant such as "(USB-C)", for narrow places.
+    fn device_short_name(&self, device: &DeviceSnapshot) -> &'static str {
+        let name = self.device_name(device);
+        name.split_once(" (").map_or(name, |(short, _)| short)
+    }
+
     fn device_name(&self, device: &DeviceSnapshot) -> &'static str {
         match device.kind {
             DeviceKind::AirPods => self
@@ -1049,6 +1055,7 @@ impl HeadphoneApp {
                     .child(
                         div()
                             .size(px(40.))
+                            .flex_shrink_0()
                             .rounded_full()
                             .overflow_hidden()
                             .flex()
@@ -1071,11 +1078,13 @@ impl HeadphoneApp {
                             .flex()
                             .flex_col()
                             .flex_1()
+                            .min_w(px(0.))
                             .gap_1()
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(self.device_name(device)),
+                                    .truncate()
+                                    .child(self.device_short_name(device)),
                             )
                             .child(div().text_sm().text_color(rgb(ON_SURFACE_VARIANT)).child(
                                 if device.connected {
@@ -1087,6 +1096,7 @@ impl HeadphoneApp {
                     )
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("{}%", device.battery_percent)),
@@ -3331,6 +3341,11 @@ mod tests {
         let index = app.device_index(BluetoothDevice::AirPods).unwrap();
         let airpods = &app.devices[index];
         assert_eq!(app.device_name(airpods), "AirPods Max");
+        app.airpods.model = Some(AirPodsModel::AirPodsPro2UsbC);
+        let airpods = &app.devices[index];
+        assert_eq!(app.device_name(airpods), "AirPods Pro 2 (USB-C)");
+        assert_eq!(app.device_short_name(airpods), "AirPods Pro 2");
+        app.airpods.model = Some(AirPodsModel::AirPodsMax);
         assert!(
             !airpods
                 .capabilities
