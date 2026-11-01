@@ -100,22 +100,72 @@ fn window_icon() -> Option<Arc<image::RgbaImage>> {
         .map(|image| Arc::new(image.into_rgba8()))
 }
 
+#[cfg(all(not(test), target_os = "linux"))]
+fn notification_icon_path(device: BluetoothDevice) -> Option<PathBuf> {
+    let directory = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("iheadphone-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).ok()?;
+
+    let (file_name, bytes) = match device {
+        BluetoothDevice::SonyWh1000Xm5 => ("sony-wh1000xm5.png", SONY_WH1000XM5_BYTES.to_vec()),
+        BluetoothDevice::AirPods => ("airpods.png", airpods_notification_icon()?),
+    };
+    let path = directory.join(file_name);
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
+#[cfg(target_os = "linux")]
+fn airpods_notification_icon() -> Option<Vec<u8>> {
+    use std::io::Cursor;
+
+    use image::imageops::FilterType;
+
+    let left = image::load_from_memory_with_format(AIRPODS_LEFT_BYTES, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    let right = image::load_from_memory_with_format(AIRPODS_RIGHT_BYTES, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    let left = image::imageops::resize(&left, 358, 358, FilterType::Lanczos3);
+    let right = image::imageops::resize(&right, 358, 358, FilterType::Lanczos3);
+
+    // Match the overlapping left/right AirPods treatment used by the device list.
+    let mut icon = image::RgbaImage::new(512, 512);
+    image::imageops::overlay(&mut icon, &left, 0, 77);
+    image::imageops::overlay(&mut icon, &right, 205, 77);
+
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(icon)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .ok()?;
+    Some(bytes.into_inner())
+}
+
 #[cfg(all(not(test), any(target_os = "linux", target_os = "macos")))]
-fn send_desktop_notification(title: &str, body: &str) {
+fn send_desktop_notification(device: BluetoothDevice, title: &str, body: &str) {
     let title = title.to_owned();
     let body = body.to_owned();
     let _ = std::thread::Builder::new()
         .name("iheadphone-notification".into())
         .spawn(move || {
             #[cfg(target_os = "linux")]
-            let result = Command::new("notify-send")
-                .args(["--app-name=iHeadphone", "--icon", APP_ID])
-                .arg(&title)
-                .arg(&body)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let result = {
+                let mut command = Command::new("notify-send");
+                command.arg("--app-name=iHeadphone");
+                if let Some(icon) = notification_icon_path(device) {
+                    command.args(["--icon"]).arg(icon);
+                }
+                command
+                    .arg(&title)
+                    .arg(&body)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+            };
 
             #[cfg(target_os = "macos")]
             let result = Command::new("osascript")
@@ -137,7 +187,7 @@ fn send_desktop_notification(title: &str, body: &str) {
 }
 
 #[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
-fn send_desktop_notification(_title: &str, _body: &str) {}
+fn send_desktop_notification(_device: BluetoothDevice, _title: &str, _body: &str) {}
 
 #[cfg(target_os = "linux")]
 struct MediaBridge {
@@ -537,7 +587,7 @@ impl HeadphoneApp {
                         Language::English => format!("{name} disconnected."),
                         Language::SimplifiedChinese => format!("{name} 已断开连接。"),
                     };
-                    send_desktop_notification("iHeadphone", &body);
+                    send_desktop_notification(kind, "iHeadphone", &body);
                 }
             }
             BluetoothEvent::Connected { device: kind, name } => {
@@ -555,7 +605,7 @@ impl HeadphoneApp {
                         Language::English => format!("{name} connected."),
                         Language::SimplifiedChinese => format!("{name} 已连接。"),
                     };
-                    send_desktop_notification("iHeadphone", &body);
+                    send_desktop_notification(kind, "iHeadphone", &body);
                 }
             }
             BluetoothEvent::Unsupported {
@@ -2651,5 +2701,17 @@ mod tests {
         assert_eq!(app.t("Settings", "设置"), "设置");
         assert_eq!(app.noise_mode_label(NoiseMode::Ambient), "环境声");
         assert_eq!(app.preset_label(EqPreset::BassBoost), "低音增强");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn builds_airpods_notification_icon_from_list_images() {
+        let bytes = airpods_notification_icon().expect("notification icon should encode");
+        let icon = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .expect("notification icon should be a PNG")
+            .into_rgba8();
+
+        assert_eq!(icon.dimensions(), (512, 512));
+        assert!(icon.pixels().any(|pixel| pixel[3] > 0));
     }
 }
