@@ -221,6 +221,11 @@ async fn scan_case_once(
         match bluez_adapter.call_method("StartDiscovery", &()).await {
             Ok(_) => true,
             Err(_error) if adapter.is_discovering().await.unwrap_or(false) => false,
+            // BlueZ can report InProgress before its Discovering property has
+            // propagated to this connection. The existing discovery session
+            // is still usable: manufacturer-data changes are broadcast to all
+            // clients, so subscribe below instead of tearing the scanner down.
+            Err(error) if discovery_is_in_progress(&error) => false,
             Err(error) => return Err(error.into()),
         }
     };
@@ -251,6 +256,14 @@ async fn scan_case_once(
             return Ok(());
         }
     }
+}
+
+fn discovery_is_in_progress(error: &zbus::Error) -> bool {
+    matches!(
+        error,
+        zbus::Error::MethodError(name, _, _)
+            if name.as_str() == "org.bluez.Error.InProgress"
+    )
 }
 
 async fn watch_address(

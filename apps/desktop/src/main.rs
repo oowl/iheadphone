@@ -365,6 +365,13 @@ struct AirPodsDetails {
     microphone: Option<AirPodsMicrophone>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetailPage {
+    Overview,
+    Sound,
+    Device,
+}
+
 struct HeadphoneApp {
     devices: Vec<DeviceSnapshot>,
     selected: usize,
@@ -374,6 +381,7 @@ struct HeadphoneApp {
     airpods: AirPodsDetails,
     language: Language,
     show_settings: bool,
+    detail_page: DetailPage,
     #[cfg(target_os = "linux")]
     _media_bridge: Option<MediaBridge>,
 }
@@ -413,6 +421,7 @@ impl HeadphoneApp {
             },
             language,
             show_settings: std::env::var_os("IHEADPHONE_OPEN_SETTINGS").is_some(),
+            detail_page: DetailPage::Overview,
             #[cfg(target_os = "linux")]
             _media_bridge: None,
         }
@@ -725,16 +734,34 @@ impl HeadphoneApp {
         for (index, device) in self.devices.iter().enumerate() {
             let selected = index == self.selected && !self.show_settings;
             let device_icon = match device.kind {
-                DeviceKind::SonyWh1000Xm5 => sony_wh1000xm5_image(),
-                DeviceKind::AirPodsPro2 => airpods_right_image(),
+                DeviceKind::SonyWh1000Xm5 => img(sony_wh1000xm5_image())
+                    .size(px(36.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                DeviceKind::AirPodsPro2 => div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        img(airpods_left_image())
+                            .size(px(28.))
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .child(
+                        img(airpods_right_image())
+                            .ml_neg_3()
+                            .size(px(28.))
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .into_any_element(),
             };
             list = list.child(
                 div()
                     .id(SharedString::from(format!("device-{index}")))
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .p_3()
+                    .gap_2()
+                    .p_2()
                     .rounded_3xl()
                     .cursor_pointer()
                     .when(selected, |e| {
@@ -748,12 +775,14 @@ impl HeadphoneApp {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = index;
                         this.show_settings = false;
+                        this.detail_page = DetailPage::Overview;
                         cx.notify();
                     }))
                     .child(
                         div()
-                            .size(px(48.))
+                            .size(px(40.))
                             .rounded_full()
+                            .overflow_hidden()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -767,11 +796,7 @@ impl HeadphoneApp {
                             } else {
                                 rgb(ON_SURFACE)
                             })
-                            .child(
-                                img(device_icon)
-                                    .size(px(42.))
-                                    .object_fit(ObjectFit::Contain),
-                            ),
+                            .child(device_icon),
                     )
                     .child(
                         div()
@@ -810,11 +835,11 @@ impl HeadphoneApp {
         };
 
         div()
-            .w(px(304.))
+            .w(px(264.))
             .h_full()
             .flex()
             .flex_col()
-            .p_5()
+            .p_4()
             .bg(rgb(SURFACE))
             .child(
                 div()
@@ -823,20 +848,20 @@ impl HeadphoneApp {
                     .gap_3()
                     .child(
                         img(app_icon_image())
-                            .size(px(42.))
+                            .size(px(36.))
                             .rounded_xl()
                             .object_fit(ObjectFit::Cover),
                     )
                     .child(
                         div()
-                            .text_xl()
+                            .text_lg()
                             .font_weight(FontWeight::BOLD)
                             .child("iHeadphone"),
                     ),
             )
             .child(
                 div()
-                    .mt_7()
+                    .mt_5()
                     .px_2()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -851,7 +876,7 @@ impl HeadphoneApp {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .p_3()
+                    .p_2()
                     .rounded_3xl()
                     .cursor_pointer()
                     .when(self.show_settings, |item| {
@@ -884,9 +909,9 @@ impl HeadphoneApp {
                     ),
             )
             .child(
-                div().mt_auto().pt_5().child(
+                div().mt_auto().pt_4().child(
                     div()
-                        .p_4()
+                        .p_3()
                         .rounded_3xl()
                         .bg(rgb(SECONDARY_CONTAINER))
                         .text_color(rgb(ON_SECONDARY_CONTAINER))
@@ -907,7 +932,7 @@ impl HeadphoneApp {
             .flex()
             .items_end()
             .justify_between()
-            .mb_5()
+            .mb_2()
             .child(
                 div()
                     .child(
@@ -920,7 +945,7 @@ impl HeadphoneApp {
                     .child(
                         div()
                             .mt_1()
-                            .text_3xl()
+                            .text_xl()
                             .font_weight(FontWeight::BOLD)
                             .child(device.kind.display_name()),
                     ),
@@ -952,6 +977,49 @@ impl HeadphoneApp {
                         chips.child(Self::chip(self.t("Charging", "充电中"), SUCCESS))
                     }),
             )
+    }
+
+    fn detail_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = [
+            (DetailPage::Overview, self.t("Overview", "概览")),
+            (DetailPage::Sound, self.t("Sound", "声音")),
+            (DetailPage::Device, self.t("Device", "设备")),
+        ];
+        let mut row = div()
+            .flex()
+            .gap_1()
+            .p_1()
+            .mb_2()
+            .rounded_full()
+            .bg(rgb(SURFACE_CONTAINER));
+        for (page, label) in tabs {
+            let selected = self.detail_page == page;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("detail-page-{page:?}")))
+                    .flex_1()
+                    .px_4()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_center()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(selected, |tab| {
+                        tab.bg(rgb(PRIMARY)).text_color(rgb(ON_PRIMARY))
+                    })
+                    .when(!selected, |tab| {
+                        tab.text_color(rgb(ON_SURFACE_VARIANT))
+                            .hover(|tab| tab.bg(rgb(SURFACE_HIGH)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.detail_page = page;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        row
     }
 
     fn hero(&self, device: &DeviceSnapshot) -> impl IntoElement {
@@ -1013,12 +1081,12 @@ impl HeadphoneApp {
         let battery_fill = device.battery_percent as f32 / 100.0;
 
         div()
-            .h(px(258.))
+            .h(px(220.))
             .w_full()
             .rounded_3xl()
             .bg(rgb(container))
             .text_color(rgb(content))
-            .p_8()
+            .p_6()
             .flex()
             .items_end()
             .justify_between()
@@ -1083,7 +1151,7 @@ impl HeadphoneApp {
         let mut modes = div()
             .flex()
             .gap_1()
-            .mt_5()
+            .mt_3()
             .p_1()
             .rounded_full()
             .bg(rgb(CANVAS).opacity(0.46));
@@ -1095,7 +1163,7 @@ impl HeadphoneApp {
                     .id(SharedString::from(format!("mode-{mode:?}")))
                     .flex_1()
                     .px_3()
-                    .py_3()
+                    .py_2()
                     .rounded_full()
                     .cursor_pointer()
                     .text_sm()
@@ -1158,7 +1226,7 @@ impl HeadphoneApp {
     ) -> impl IntoElement {
         div()
             .id(id)
-            .size(px(44.))
+            .size(px(36.))
             .rounded_full()
             .bg(rgb(SECONDARY_CONTAINER))
             .text_color(rgb(ON_SECONDARY_CONTAINER))
@@ -1166,7 +1234,7 @@ impl HeadphoneApp {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_xl()
+            .text_lg()
             .hover(|e| e.bg(rgb(PRIMARY_CONTAINER)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.devices[this.selected].adjust_ambient(delta);
@@ -1188,7 +1256,7 @@ impl HeadphoneApp {
                 "精细调节外界声音的通透程度",
             ),
             div()
-                .mt_5()
+                .mt_3()
                 .flex()
                 .items_center()
                 .gap_3()
@@ -1196,7 +1264,7 @@ impl HeadphoneApp {
                 .child(
                     div()
                         .flex_1()
-                        .h(px(16.))
+                        .h(px(10.))
                         .rounded_full()
                         .bg(rgb(SURFACE_HIGH))
                         .overflow_hidden()
@@ -1235,9 +1303,9 @@ impl HeadphoneApp {
             .flex()
             .items_center()
             .justify_between()
-            .gap_4()
-            .p_5()
-            .rounded_3xl()
+            .gap_2()
+            .p_3()
+            .rounded_2xl()
             .bg(if enabled {
                 rgb(SECONDARY_CONTAINER)
             } else {
@@ -1247,11 +1315,11 @@ impl HeadphoneApp {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap_px()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(
                         div()
-                            .text_sm()
+                            .text_xs()
                             .text_color(rgb(ON_SURFACE_VARIANT))
                             .child(description),
                     ),
@@ -1259,9 +1327,9 @@ impl HeadphoneApp {
             .child(
                 div()
                     .id(SharedString::from(format!("feature-{title}")))
-                    .w(px(56.))
-                    .h(px(32.))
-                    .p(px(4.))
+                    .w(px(48.))
+                    .h(px(28.))
+                    .p(px(3.))
                     .rounded_full()
                     .cursor_pointer()
                     .flex()
@@ -1272,7 +1340,7 @@ impl HeadphoneApp {
                         toggle(this);
                         cx.notify();
                     }))
-                    .child(div().size(px(24.)).rounded_full().bg(if enabled {
+                    .child(div().size(px(22.)).rounded_full().bg(if enabled {
                         rgb(ON_PRIMARY)
                     } else {
                         rgb(SURFACE_HIGH)
@@ -1345,11 +1413,11 @@ impl HeadphoneApp {
 
         div()
             .w_full()
-            .h(px(430.))
+            .h(px(250.))
             .rounded_3xl()
             .overflow_hidden()
             .bg(rgb(SURFACE_CONTAINER))
-            .p_6()
+            .p_4()
             .flex()
             .child(
                 div()
@@ -1360,7 +1428,7 @@ impl HeadphoneApp {
                     .justify_center()
                     .child(
                         img(sony_wh1000xm5_image())
-                            .size(px(390.))
+                            .size(px(225.))
                             .object_fit(ObjectFit::Contain),
                     ),
             )
@@ -1368,7 +1436,7 @@ impl HeadphoneApp {
                 div()
                     .w(gpui_kit::relative(0.43))
                     .h_full()
-                    .pl_6()
+                    .pl_4()
                     .border_l_1()
                     .border_color(rgb(OUTLINE).opacity(0.24))
                     .flex()
@@ -1420,19 +1488,19 @@ impl HeadphoneApp {
         div()
             .flex()
             .items_center()
-            .gap_4()
-            .py_3()
+            .gap_2()
+            .py_1()
             .border_b_1()
             .border_color(rgb(OUTLINE).opacity(0.14))
             .child(
                 div()
-                    .size(px(52.))
+                    .size(px(34.))
                     .rounded_full()
                     .border_2()
                     .border_color(rgb(color).opacity(0.76))
                     .bg(rgb(color).opacity(0.10))
                     .text_color(rgb(color))
-                    .text_xl()
+                    .text_sm()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1443,14 +1511,14 @@ impl HeadphoneApp {
                     .flex_1()
                     .child(
                         div()
-                            .text_sm()
+                            .text_xs()
                             .text_color(rgb(ON_SURFACE_VARIANT))
                             .child(label),
                     )
                     .child(
                         div()
                             .mt_1()
-                            .text_xl()
+                            .text_base()
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(color))
                             .child(value),
@@ -1458,8 +1526,8 @@ impl HeadphoneApp {
                     .when_some(progress, |content, progress| {
                         content.child(
                             div()
-                                .mt_2()
-                                .h(px(8.))
+                                .mt_1()
+                                .h(px(4.))
                                 .w_full()
                                 .rounded_full()
                                 .overflow_hidden()
@@ -1540,11 +1608,11 @@ impl HeadphoneApp {
 
         div()
             .w_full()
-            .h(px(390.))
+            .h(px(300.))
             .rounded_3xl()
             .overflow_hidden()
             .bg(rgb(SURFACE_CONTAINER))
-            .p_6()
+            .p_4()
             .child(
                 div()
                     .flex()
@@ -1636,14 +1704,14 @@ impl HeadphoneApp {
         };
 
         div()
-            .w(px(210.))
+            .w(px(150.))
             .flex()
             .flex_col()
             .items_center()
             .child(
                 div()
                     .relative()
-                    .size(px(178.))
+                    .size(px(112.))
                     .rounded_full()
                     .border_2()
                     .border_color(rgb(color).opacity(0.78))
@@ -1651,19 +1719,19 @@ impl HeadphoneApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(img(image).size(px(158.)).object_fit(ObjectFit::Contain))
+                    .child(img(image).size(px(100.)).object_fit(ObjectFit::Contain))
                     .child(
                         div()
                             .absolute()
                             .top(px(4.))
                             .right(px(4.))
-                            .size(px(42.))
+                            .size(px(30.))
                             .rounded_full()
                             .border_2()
                             .border_color(rgb(SURFACE_CONTAINER))
                             .bg(rgb(color))
                             .text_color(rgb(CANVAS))
-                            .text_lg()
+                            .text_sm()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1682,7 +1750,7 @@ impl HeadphoneApp {
             .child(
                 div()
                     .mt_1()
-                    .text_2xl()
+                    .text_xl()
                     .font_weight(FontWeight::BOLD)
                     .child(level.map_or_else(|| "—".into(), |level| format!("{level}%"))),
             )
@@ -1696,13 +1764,13 @@ impl HeadphoneApp {
             AIRPODS_CASE
         };
         div()
-            .w(px(250.))
+            .w(px(180.))
             .flex()
             .flex_col()
             .items_center()
             .child(
                 img(airpods_case_image())
-                    .size(px(220.))
+                    .size(px(145.))
                     .object_fit(ObjectFit::Contain),
             )
             .child(
@@ -1746,7 +1814,7 @@ impl HeadphoneApp {
             (AirPodsMicrophone::Left, self.t("Always left", "始终左耳")),
             (AirPodsMicrophone::Right, self.t("Always right", "始终右耳")),
         ];
-        let mut controls = div().flex().flex_wrap().gap_2().mt_5();
+        let mut controls = div().flex().flex_wrap().gap_2().mt_3();
         for (microphone, label) in options {
             controls = controls.child(Self::choice_button(
                 SharedString::from(format!("airpods-microphone-{microphone:?}")),
@@ -1800,7 +1868,7 @@ impl HeadphoneApp {
             preset: EqPreset::Off,
             bands: [0; 6],
         });
-        let mut presets = div().flex().flex_wrap().gap_2().mt_5();
+        let mut presets = div().flex().flex_wrap().gap_2().mt_3();
         for preset in EqPreset::CHOICES {
             let selected = equalizer.preset == preset;
             presets = presets.child(Self::choice_button(
@@ -1826,11 +1894,11 @@ impl HeadphoneApp {
             "6.3 kHz",
             "16 kHz",
         ];
-        let mut bands = div().grid().grid_cols(3).gap_3().mt_5();
+        let mut bands = div().grid().grid_cols(3).gap_2().mt_3();
         for (index, label) in labels.into_iter().enumerate() {
             bands = bands.child(
                 div()
-                    .p_3()
+                    .p_2()
                     .rounded_2xl()
                     .bg(rgb(SURFACE_HIGH))
                     .child(
@@ -1949,7 +2017,7 @@ impl HeadphoneApp {
 
         let section = |label: &'static str, choices| {
             div()
-                .mt_5()
+                .mt_3()
                 .child(
                     div()
                         .text_sm()
@@ -1980,11 +2048,11 @@ impl HeadphoneApp {
     }
 
     fn connections_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut devices = div().flex().flex_col().gap_2().mt_5();
+        let mut devices = div().flex().flex_col().gap_2().mt_3();
         if self.sony.connected_devices.is_empty() {
             devices = devices.child(
                 div()
-                    .p_4()
+                    .p_3()
                     .rounded_2xl()
                     .bg(rgb(SURFACE_HIGH))
                     .text_color(rgb(ON_SURFACE_VARIANT))
@@ -2001,7 +2069,7 @@ impl HeadphoneApp {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .p_4()
+                    .p_3()
                     .rounded_2xl()
                     .bg(rgb(SURFACE_HIGH))
                     .child(
@@ -2050,9 +2118,9 @@ impl HeadphoneApp {
             ),
             div()
                 .id("power-off-headphones")
-                .mt_5()
-                .px_5()
-                .py_3()
+                .mt_3()
+                .px_4()
+                .py_2()
                 .rounded_full()
                 .cursor_pointer()
                 .bg(rgb(TERTIARY_CONTAINER))
@@ -2094,7 +2162,7 @@ impl HeadphoneApp {
             .flex_1()
             .h_full()
             .overflow_y_scrollbar()
-            .p_7()
+            .p_5()
             .child(
                 div()
                     .text_sm()
@@ -2105,7 +2173,7 @@ impl HeadphoneApp {
             .child(
                 div()
                     .mt_1()
-                    .text_3xl()
+                    .text_2xl()
                     .font_weight(FontWeight::BOLD)
                     .child(self.t("Settings", "设置")),
             )
@@ -2118,7 +2186,7 @@ impl HeadphoneApp {
                         "个性化 iHeadphone，不会修改耳机本身的设置。",
                     )),
             )
-            .child(div().mt_6().child(self.panel(
+            .child(div().mt_4().child(self.panel(
                 self.t("Language", "语言"),
                 self.t(
                     "Choose the language used throughout the application",
@@ -2188,14 +2256,14 @@ impl HeadphoneApp {
     ) -> impl IntoElement {
         div()
             .flex_1()
-            .p_5()
-            .rounded_3xl()
+            .p_3()
+            .rounded_2xl()
             .bg(rgb(SURFACE_CONTAINER))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
             .child(
                 div()
                     .mt_1()
-                    .text_sm()
+                    .text_xs()
                     .text_color(rgb(ON_SURFACE_VARIANT))
                     .child(subtitle),
             )
@@ -2207,7 +2275,12 @@ impl Render for HeadphoneApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let device = self.selected_device().clone();
         let selected = self.selected;
-        let mut features = div().grid().grid_cols(2).gap_3().mt_3();
+        let page = self.detail_page;
+        let sony_over_ear = device.kind.uses_sony_over_ear_layout();
+        let show_features = (page == DetailPage::Overview
+            && device.kind != DeviceKind::AirPodsPro2)
+            || (page == DetailPage::Device && device.kind == DeviceKind::AirPodsPro2);
+        let mut features = div().grid().grid_cols(2).gap_2().mt_2();
         if device.capabilities.equalizer && device.kind != DeviceKind::SonyWh1000Xm5 {
             features = features.child(self.feature_card(
                 self.t("Equalizer", "均衡器"),
@@ -2341,82 +2414,82 @@ impl Render for HeadphoneApp {
                         .flex_1()
                         .h_full()
                         .overflow_y_scrollbar()
-                        .p_7()
+                        .p_4()
                         .child(self.app_header(&device))
-                        .when(device.kind.uses_sony_over_ear_layout(), |content| {
-                            content.child(self.sony_over_ear_hero(&device))
-                        })
-                        .when(
-                            device.kind != DeviceKind::AirPodsPro2
-                                && !device.kind.uses_sony_over_ear_layout(),
-                            |content| content.child(self.hero(&device)),
-                        )
-                        .when(device.kind.uses_sony_over_ear_layout(), |content| {
-                            content
-                                .when(device.capabilities.ambient_level, |content| {
-                                    content.child(
-                                        div().mt_3().child(self.ambient_control(&device, cx)),
-                                    )
-                                })
-                                .child(div().mt_3().child(self.mode_controls(&device, cx)))
-                        })
-                        .when(device.kind == DeviceKind::AirPodsPro2, |content| {
-                            content.child(self.airpods_hero())
-                        })
-                        .when(!device.kind.uses_sony_over_ear_layout(), |content| {
-                            content.child(
+                        .child(self.detail_tabs(cx))
+                        .when(page == DetailPage::Overview && sony_over_ear, |content| {
+                            content.child(self.sony_over_ear_hero(&device)).child(
                                 div()
                                     .flex()
-                                    .gap_3()
-                                    .mt_3()
+                                    .gap_2()
+                                    .mt_2()
                                     .child(self.mode_controls(&device, cx))
                                     .when(device.capabilities.ambient_level, |row| {
                                         row.child(self.ambient_control(&device, cx))
                                     }),
                             )
                         })
-                        .child(features)
-                        .when(device.kind == DeviceKind::SonyWh1000Xm5, |content| {
+                        .when(
+                            page == DetailPage::Overview && device.kind == DeviceKind::AirPodsPro2,
+                            |content| {
+                                content
+                                    .child(self.airpods_hero())
+                                    .child(div().mt_3().child(self.mode_controls(&device, cx)))
+                            },
+                        )
+                        .when(
+                            page == DetailPage::Overview
+                                && !sony_over_ear
+                                && device.kind != DeviceKind::AirPodsPro2,
+                            |content| content.child(self.hero(&device)),
+                        )
+                        .when(page == DetailPage::Sound && sony_over_ear, |content| {
                             content
-                                .child(div().mt_3().child(self.sony_info_panel()))
-                                .child(div().mt_3().child(self.equalizer_panel(cx)))
                                 .child(
                                     div()
                                         .flex()
                                         .gap_3()
-                                        .mt_3()
-                                        .child(self.sony_settings_panel(cx))
-                                        .child(self.connections_panel(cx)),
+                                        .child(self.mode_controls(&device, cx))
+                                        .when(device.capabilities.ambient_level, |row| {
+                                            row.child(self.ambient_control(&device, cx))
+                                        }),
                                 )
-                                .child(div().mt_3().child(self.power_off_panel(cx)))
+                                .child(div().mt_3().child(self.equalizer_panel(cx)))
                         })
-                        .when(device.kind == DeviceKind::AirPodsPro2, |content| {
-                            content.child(div().mt_3().child(self.airpods_settings_panel(cx)))
-                        })
-                        .child(
-                            div()
-                                .mt_4()
-                                .pb_3()
-                                .text_sm()
-                                .text_color(rgb(ON_SURFACE_VARIANT))
-                                .child(if self.requests.is_some() {
-                                    match device.kind {
-                                        DeviceKind::SonyWh1000Xm5 => self.t(
-                                            "Sony XM5 hardware transport · RFCOMM",
-                                            "Sony XM5 硬件传输 · RFCOMM",
+                        .when(
+                            page == DetailPage::Sound && device.kind == DeviceKind::AirPodsPro2,
+                            |content| {
+                                content
+                                    .child(self.mode_controls(&device, cx))
+                                    .child(div().mt_3().child(self.airpods_settings_panel(cx)))
+                            },
+                        )
+                        .when(
+                            page == DetailPage::Device && device.kind == DeviceKind::SonyWh1000Xm5,
+                            |content| {
+                                content.child(
+                                    div()
+                                        .flex()
+                                        .gap_3()
+                                        .child(self.sony_settings_panel(cx))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_3()
+                                                .child(self.sony_info_panel())
+                                                .child(self.connections_panel(cx))
+                                                .child(self.power_off_panel(cx)),
                                         ),
-                                        DeviceKind::AirPodsPro2 => self.t(
-                                            "AirPods hardware transport · Apple AAP over L2CAP",
-                                            "AirPods 硬件传输 · 基于 L2CAP 的 Apple AAP",
-                                        ),
-                                    }
-                                } else {
-                                    self.t(
-                                        "Preview build · hardware transport is mocked",
-                                        "预览版本 · 硬件传输为模拟模式",
-                                    )
-                                }),
-                        ),
+                                )
+                            },
+                        )
+                        .when(
+                            page == DetailPage::Device && device.kind == DeviceKind::AirPodsPro2,
+                            |content| content.child(self.airpods_settings_panel(cx)),
+                        )
+                        .when(show_features, |content| content.child(features)),
                 )
             })
     }
