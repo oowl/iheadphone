@@ -52,6 +52,22 @@ const AIRPODS_CASE: u32 = 0x88b8ff;
 const SONY_MODE: u32 = 0xf18ae8;
 const SONY_CODEC: u32 = 0x78b0ff;
 const APP_ID: &str = "io.github.iheadphone.iheadphone";
+
+// Icons render only when their SVGs are registered as assets; embed just the
+// ones the interface uses.
+gpui_kit::assets::icon_assets!(
+    AppIcons,
+    [
+        AudioLines,
+        Battery,
+        BatteryCharging,
+        CircleOff,
+        Cpu,
+        Ear,
+        EarOff,
+        PackageOpen,
+    ]
+);
 const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/iheadphone-icon.png");
 const AIRPODS_LEFT_BYTES: &[u8] = include_bytes!("../assets/airpods-left.png");
 const AIRPODS_RIGHT_BYTES: &[u8] = include_bytes!("../assets/airpods-right.png");
@@ -522,6 +538,79 @@ impl AirPodsDetails {
     }
 }
 
+/// Sample state for preview mode, so every panel has something to show.
+fn preview_airpods() -> AirPodsDetails {
+    AirPodsDetails {
+        model: Some(AirPodsModel::AirPodsPro2UsbC),
+        info: Some(AirPodsInfo {
+            name: Some("AirPods Pro".into()),
+            model_number: Some("A3048".into()),
+            manufacturer: Some("Apple Inc.".into()),
+            serial_number: Some("PREVIEW0001".into()),
+            firmware: Some("7E93".into()),
+            left_serial_number: Some("PREVIEWL001".into()),
+            right_serial_number: Some("PREVIEWR001".into()),
+        }),
+        battery: AirPodsBattery {
+            primary: Some(AirPodsSide::Left),
+            left: Some(92),
+            right: Some(88),
+            case: Some(64),
+            case_charging: true,
+            ..AirPodsBattery::default()
+        },
+        wearing: Some(AirPodsWearing {
+            primary: PodState::InEar,
+            secondary: PodState::InEar,
+        }),
+        ear_detection: true,
+        one_bud_anc: true,
+        microphone: Some(AirPodsMicrophone::Automatic),
+        mode_cycle: Some(AirPodsModeCycle::from_modes([
+            AirPodsListeningMode::NoiseCancelling,
+            AirPodsListeningMode::Transparency,
+            AirPodsListeningMode::Adaptive,
+        ])),
+        adaptive_noise_level: Some(50),
+        press_speed: Some(AirPodsTiming::Default),
+        press_and_hold_duration: Some(AirPodsTiming::Default),
+        chime_volume: Some(70),
+        volume_swipe: Some(true),
+        volume_swipe_interval: Some(AirPodsTiming::Default),
+        personalized_volume: Some(true),
+    }
+}
+
+fn preview_sony() -> SonyDetails {
+    SonyDetails {
+        firmware: Some("2.1.0".into()),
+        codec: Some("LDAC".into()),
+        focus_on_voice: true,
+        equalizer: Some(Equalizer {
+            preset: EqPreset::Custom1,
+            bands: [3, 2, 0, -1, 1, 3],
+        }),
+        auto_off: Some(AutoOff::WhenTakenOff),
+        noise_button: Some(NoiseButton::NoiseCancellingAmbient),
+        voice_sensitivity: Some(VoiceSensitivity::Auto),
+        speak_to_chat_end: Some(SpeakToChatEnd::Standard),
+        wearing_status: Some(WearingStatus::Normal),
+        connected_devices: vec![
+            ConnectedDevice {
+                id: "preview-laptop".into(),
+                name: "Linux laptop".into(),
+                playing: true,
+            },
+            ConnectedDevice {
+                id: "preview-phone".into(),
+                name: "Phone".into(),
+                playing: false,
+            },
+        ],
+        ..SonyDetails::default()
+    }
+}
+
 fn noise_mode_from_airpods(mode: AirPodsListeningMode) -> NoiseMode {
     match mode {
         AirPodsListeningMode::Off => NoiseMode::Off,
@@ -575,7 +664,7 @@ impl HeadphoneApp {
     fn new(requests: Option<mpsc::Sender<BluetoothRequest>>) -> Self {
         let hardware = requests.is_some();
         let language = Language::load();
-        let devices = if hardware {
+        let mut devices = if hardware {
             let mut sony = sony_wh1000xm5(false);
             sony.battery_percent = 0;
             sony.noise_mode = NoiseMode::Off;
@@ -586,9 +675,40 @@ impl HeadphoneApp {
         } else {
             mock_devices()
         };
+        let airpods_details = if hardware {
+            AirPodsDetails {
+                ear_detection: true,
+                ..AirPodsDetails::default()
+            }
+        } else {
+            let details = preview_airpods();
+            for device in &mut devices {
+                if device.kind == DeviceKind::AirPods {
+                    device.battery_percent = details.battery.earbuds_percent().unwrap_or(0);
+                }
+            }
+            details
+        };
+        // For UI work and screenshots: IHEADPHONE_OPEN_DEVICE=sony|airpods and
+        // IHEADPHONE_OPEN_PAGE=overview|sound|device.
+        let open_device = std::env::var("IHEADPHONE_OPEN_DEVICE").ok();
+        let selected = open_device
+            .as_deref()
+            .and_then(|name| {
+                devices.iter().position(|device| match device.kind {
+                    DeviceKind::AirPods => name.eq_ignore_ascii_case("airpods"),
+                    DeviceKind::SonyWh1000Xm5 => name.eq_ignore_ascii_case("sony"),
+                })
+            })
+            .unwrap_or(0);
+        let detail_page = match std::env::var("IHEADPHONE_OPEN_PAGE").as_deref() {
+            Ok("sound") => DetailPage::Sound,
+            Ok("device") => DetailPage::Device,
+            _ => DetailPage::Overview,
+        };
         Self {
             devices,
-            selected: 0,
+            selected,
             requests,
             backend_status: if hardware && language == Language::SimplifiedChinese {
                 "正在查找 WH-1000XM5…".into()
@@ -599,14 +719,15 @@ impl HeadphoneApp {
             } else {
                 "Controls are running in preview mode.".into()
             },
-            sony: SonyDetails::default(),
-            airpods: AirPodsDetails {
-                ear_detection: true,
-                ..AirPodsDetails::default()
+            sony: if hardware {
+                SonyDetails::default()
+            } else {
+                preview_sony()
             },
+            airpods: airpods_details,
             language,
             show_settings: std::env::var_os("IHEADPHONE_OPEN_SETTINGS").is_some(),
-            detail_page: DetailPage::Overview,
+            detail_page,
             #[cfg(target_os = "linux")]
             _media_bridge: None,
         }
@@ -3152,50 +3273,52 @@ impl Render for HeadphoneApp {
 }
 
 fn main() {
-    gpui_kit::application().run(|cx: &mut App| {
-        gpui_kit::init(cx);
-        let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
-        let demo = std::env::var_os("IHEADPHONE_DEMO").is_some();
-        let (requests, events) = if demo {
-            (None, None)
-        } else {
-            let link = iheadphone_transport::start(Some("WH-1000XM5".into()));
-            (Some(link.requests), Some(link.events))
-        };
-        let app: Entity<HeadphoneApp> = cx.new(|_| {
-            let mut app = HeadphoneApp::new(requests);
-            #[cfg(target_os = "linux")]
-            {
-                app._media_bridge = Some(MediaBridge::start());
-            }
-            app
-        });
-
-        if let Some(events) = events {
-            let model = app.clone();
-            cx.spawn(async move |cx| {
-                while let Ok(event) = events.recv().await {
-                    model.update(cx, |app, cx| {
-                        app.apply_bluetooth_event(event);
-                        cx.notify();
-                    });
+    gpui_kit::application()
+        .with_assets(AppIcons)
+        .run(|cx: &mut App| {
+            gpui_kit::init(cx);
+            let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
+            let demo = std::env::var_os("IHEADPHONE_DEMO").is_some();
+            let (requests, events) = if demo {
+                (None, None)
+            } else {
+                let link = iheadphone_transport::start(Some("WH-1000XM5".into()));
+                (Some(link.requests), Some(link.events))
+            };
+            let app: Entity<HeadphoneApp> = cx.new(|_| {
+                let mut app = HeadphoneApp::new(requests);
+                #[cfg(target_os = "linux")]
+                {
+                    app._media_bridge = Some(MediaBridge::start());
                 }
-            })
-            .detach();
-        }
+                app
+            });
 
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                app_id: Some(APP_ID.into()),
-                icon: window_icon(),
-                ..Default::default()
-            },
-            cx,
-            |_, _| app,
-        )
-        .expect("failed to open iHeadphone window");
-    });
+            if let Some(events) = events {
+                let model = app.clone();
+                cx.spawn(async move |cx| {
+                    while let Ok(event) = events.recv().await {
+                        model.update(cx, |app, cx| {
+                            app.apply_bluetooth_event(event);
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_id: Some(APP_ID.into()),
+                    icon: window_icon(),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| app,
+            )
+            .expect("failed to open iHeadphone window");
+        });
 }
 
 #[cfg(test)]
