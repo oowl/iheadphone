@@ -5,7 +5,7 @@ use std::process::Child;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock, mpsc};
 
-use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::{Icon, scroll::ScrollableElement};
 use gpui_kit::{
     App, AppContext, Bounds, Context, Entity, FontWeight, Image as GpuiImage, ImageFormat,
     IntoElement, ObjectFit, Render, SharedString, Window, WindowBounds, WindowOptions,
@@ -47,15 +47,19 @@ const SUCCESS: u32 = 0xa7f0ba;
 const AIRPODS_WORN: u32 = 0x70e1a1;
 const AIRPODS_CHARGING: u32 = 0xb79cff;
 const AIRPODS_CASE: u32 = 0x88b8ff;
+const SONY_MODE: u32 = 0xf18ae8;
+const SONY_CODEC: u32 = 0x78b0ff;
 const APP_ID: &str = "io.github.iheadphone.iheadphone";
 const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/iheadphone-icon.png");
 const AIRPODS_LEFT_BYTES: &[u8] = include_bytes!("../assets/airpods-left.png");
 const AIRPODS_RIGHT_BYTES: &[u8] = include_bytes!("../assets/airpods-right.png");
 const AIRPODS_CASE_BYTES: &[u8] = include_bytes!("../assets/airpods-case.png");
+const SONY_WH1000XM5_BYTES: &[u8] = include_bytes!("../assets/sony-wh1000xm5.png");
 static APP_ICON_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
 static AIRPODS_LEFT_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
 static AIRPODS_RIGHT_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
 static AIRPODS_CASE_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
+static SONY_WH1000XM5_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
 
 fn app_icon_image() -> Arc<GpuiImage> {
     APP_ICON_IMAGE
@@ -84,6 +88,10 @@ fn airpods_right_image() -> Arc<GpuiImage> {
 
 fn airpods_case_image() -> Arc<GpuiImage> {
     embedded_png(&AIRPODS_CASE_IMAGE, AIRPODS_CASE_BYTES)
+}
+
+fn sony_wh1000xm5_image() -> Arc<GpuiImage> {
+    embedded_png(&SONY_WH1000XM5_IMAGE, SONY_WH1000XM5_BYTES)
 }
 
 fn window_icon() -> Option<Arc<image::RgbaImage>> {
@@ -716,10 +724,9 @@ impl HeadphoneApp {
         let mut list = div().flex().flex_col().gap_2().mt_4();
         for (index, device) in self.devices.iter().enumerate() {
             let selected = index == self.selected && !self.show_settings;
-            let initial = if device.kind.manufacturer() == "Sony" {
-                "S"
-            } else {
-                "A"
+            let device_icon = match device.kind {
+                DeviceKind::SonyWh1000Xm5 => sony_wh1000xm5_image(),
+                DeviceKind::AirPodsPro2 => airpods_right_image(),
             };
             list = list.child(
                 div()
@@ -760,8 +767,11 @@ impl HeadphoneApp {
                             } else {
                                 rgb(ON_SURFACE)
                             })
-                            .font_weight(FontWeight::BOLD)
-                            .child(initial),
+                            .child(
+                                img(device_icon)
+                                    .size(px(42.))
+                                    .object_fit(ObjectFit::Contain),
+                            ),
                     )
                     .child(
                         div()
@@ -1300,6 +1310,172 @@ impl HeadphoneApp {
             .child(label)
     }
 
+    fn sony_over_ear_hero(&self, device: &DeviceSnapshot) -> impl IntoElement {
+        let (wearing, wearing_color, wearing_icon) = match self.sony.wearing_status {
+            Some(WearingStatus::Normal) => (self.t("Worn", "已佩戴"), AIRPODS_WORN, IconName::Ear),
+            Some(WearingStatus::LeftRemoved | WearingStatus::RightRemoved) => (
+                self.t("Partially removed", "部分摘下"),
+                AIRPODS_CASE,
+                IconName::EarOff,
+            ),
+            Some(WearingStatus::BothRemoved) => {
+                (self.t("Removed", "已摘下"), OUTLINE, IconName::EarOff)
+            }
+            Some(WearingStatus::Illegal) => (
+                self.t("Status unavailable", "状态异常"),
+                OUTLINE,
+                IconName::CircleOff,
+            ),
+            None => (self.t("Reading…", "读取中…"), OUTLINE, IconName::Ear),
+        };
+        let battery = if self.sony.charging {
+            format!(
+                "{}% · {}",
+                device.battery_percent,
+                self.t("Charging", "充电中")
+            )
+        } else {
+            format!("{}%", device.battery_percent)
+        };
+        let codec = self
+            .sony
+            .codec
+            .clone()
+            .unwrap_or_else(|| self.t("Reading…", "读取中…").into());
+
+        div()
+            .w_full()
+            .h(px(430.))
+            .rounded_3xl()
+            .overflow_hidden()
+            .bg(rgb(SURFACE_CONTAINER))
+            .p_6()
+            .flex()
+            .child(
+                div()
+                    .w(gpui_kit::relative(0.57))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        img(sony_wh1000xm5_image())
+                            .size(px(390.))
+                            .object_fit(ObjectFit::Contain),
+                    ),
+            )
+            .child(
+                div()
+                    .w(gpui_kit::relative(0.43))
+                    .h_full()
+                    .pl_6()
+                    .border_l_1()
+                    .border_color(rgb(OUTLINE).opacity(0.24))
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .child(self.sony_status_row(
+                        self.t("Battery", "整机电量"),
+                        battery.into(),
+                        PRIMARY,
+                        if self.sony.charging {
+                            IconName::BatteryCharging
+                        } else {
+                            IconName::Battery
+                        },
+                        Some(device.battery_percent as f32 / 100.0),
+                    ))
+                    .child(self.sony_status_row(
+                        self.t("Wearing status", "佩戴状态"),
+                        wearing.into(),
+                        wearing_color,
+                        wearing_icon,
+                        None,
+                    ))
+                    .child(self.sony_status_row(
+                        self.t("Sound mode", "声音模式"),
+                        self.noise_mode_label(device.noise_mode).into(),
+                        SONY_MODE,
+                        IconName::AudioLines,
+                        None,
+                    ))
+                    .child(self.sony_status_row(
+                        self.t("Codec", "编解码器"),
+                        codec.into(),
+                        SONY_CODEC,
+                        IconName::Cpu,
+                        None,
+                    )),
+            )
+    }
+
+    fn sony_status_row(
+        &self,
+        label: &'static str,
+        value: SharedString,
+        color: u32,
+        icon: IconName,
+        progress: Option<f32>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(OUTLINE).opacity(0.14))
+            .child(
+                div()
+                    .size(px(52.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(color).opacity(0.76))
+                    .bg(rgb(color).opacity(0.10))
+                    .text_color(rgb(color))
+                    .text_xl()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(icon).text_color(rgb(color))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(color))
+                            .child(value),
+                    )
+                    .when_some(progress, |content, progress| {
+                        content.child(
+                            div()
+                                .mt_2()
+                                .h(px(8.))
+                                .w_full()
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(rgb(OUTLINE).opacity(0.18))
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(gpui_kit::relative(progress))
+                                        .rounded_full()
+                                        .bg(rgb(color)),
+                                ),
+                        )
+                    }),
+            )
+    }
+
     fn sony_info_panel(&self) -> impl IntoElement {
         let info = [
             (
@@ -1491,7 +1667,7 @@ impl HeadphoneApp {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon),
+                            .child(Icon::new(icon).text_color(rgb(CANVAS))),
                     ),
             )
             .child(div().mt_2().font_weight(FontWeight::SEMIBOLD).child(label))
@@ -1541,7 +1717,7 @@ impl HeadphoneApp {
                     .bg(rgb(color).opacity(0.14))
                     .text_color(rgb(color))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(IconName::Battery)
+                    .child(Icon::new(IconName::Battery).text_color(rgb(color)))
                     .child(self.t("Case", "充电盒"))
                     .child(level.map_or_else(|| "—".into(), |level| format!("{level}%"))),
             )
@@ -2167,22 +2343,38 @@ impl Render for HeadphoneApp {
                         .overflow_y_scrollbar()
                         .p_7()
                         .child(self.app_header(&device))
-                        .when(device.kind == DeviceKind::SonyWh1000Xm5, |content| {
-                            content.child(self.hero(&device))
+                        .when(device.kind.uses_sony_over_ear_layout(), |content| {
+                            content.child(self.sony_over_ear_hero(&device))
+                        })
+                        .when(
+                            device.kind != DeviceKind::AirPodsPro2
+                                && !device.kind.uses_sony_over_ear_layout(),
+                            |content| content.child(self.hero(&device)),
+                        )
+                        .when(device.kind.uses_sony_over_ear_layout(), |content| {
+                            content
+                                .when(device.capabilities.ambient_level, |content| {
+                                    content.child(
+                                        div().mt_3().child(self.ambient_control(&device, cx)),
+                                    )
+                                })
+                                .child(div().mt_3().child(self.mode_controls(&device, cx)))
                         })
                         .when(device.kind == DeviceKind::AirPodsPro2, |content| {
                             content.child(self.airpods_hero())
                         })
-                        .child(
-                            div()
-                                .flex()
-                                .gap_3()
-                                .mt_3()
-                                .child(self.mode_controls(&device, cx))
-                                .when(device.capabilities.ambient_level, |row| {
-                                    row.child(self.ambient_control(&device, cx))
-                                }),
-                        )
+                        .when(!device.kind.uses_sony_over_ear_layout(), |content| {
+                            content.child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .mt_3()
+                                    .child(self.mode_controls(&device, cx))
+                                    .when(device.capabilities.ambient_level, |row| {
+                                        row.child(self.ambient_control(&device, cx))
+                                    }),
+                            )
+                        })
                         .child(features)
                         .when(device.kind == DeviceKind::SonyWh1000Xm5, |content| {
                             content

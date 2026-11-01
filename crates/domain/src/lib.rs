@@ -4,6 +4,12 @@ pub enum DeviceKind {
     SonyWh1000Xm5,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormFactor {
+    TrueWireless,
+    OverEar,
+}
+
 impl DeviceKind {
     pub const fn display_name(self) -> &'static str {
         match self {
@@ -17,6 +23,17 @@ impl DeviceKind {
             Self::AirPodsPro2 => "Apple",
             Self::SonyWh1000Xm5 => "Sony",
         }
+    }
+
+    pub const fn form_factor(self) -> FormFactor {
+        match self {
+            Self::AirPodsPro2 => FormFactor::TrueWireless,
+            Self::SonyWh1000Xm5 => FormFactor::OverEar,
+        }
+    }
+
+    pub fn uses_sony_over_ear_layout(self) -> bool {
+        self.manufacturer() == "Sony" && self.form_factor() == FormFactor::OverEar
     }
 }
 
@@ -167,5 +184,11 @@ mod tests {
         assert_eq!(sony.ambient_level, 1);
         sony.adjust_ambient(100);
         assert_eq!(sony.ambient_level, 20);
+    }
+
+    #[test]
+    fn routes_only_sony_over_ear_devices_to_the_headband_layout() {
+        assert!(DeviceKind::SonyWh1000Xm5.uses_sony_over_ear_layout());
+        assert!(!DeviceKind::AirPodsPro2.uses_sony_over_ear_layout());
     }
 }
