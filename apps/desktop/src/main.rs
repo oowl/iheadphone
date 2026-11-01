@@ -52,6 +52,22 @@ const AIRPODS_CASE: u32 = 0x88b8ff;
 const SONY_MODE: u32 = 0xf18ae8;
 const SONY_CODEC: u32 = 0x78b0ff;
 const APP_ID: &str = "io.github.iheadphone.iheadphone";
+
+// Icons render only when their SVGs are registered as assets; embed just the
+// ones the interface uses.
+gpui_kit::assets::icon_assets!(
+    AppIcons,
+    [
+        AudioLines,
+        Battery,
+        BatteryCharging,
+        CircleOff,
+        Cpu,
+        Ear,
+        EarOff,
+        PackageOpen,
+    ]
+);
 const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/iheadphone-icon.png");
 const AIRPODS_LEFT_BYTES: &[u8] = include_bytes!("../assets/airpods-left.png");
 const AIRPODS_RIGHT_BYTES: &[u8] = include_bytes!("../assets/airpods-right.png");
@@ -3152,50 +3168,52 @@ impl Render for HeadphoneApp {
 }
 
 fn main() {
-    gpui_kit::application().run(|cx: &mut App| {
-        gpui_kit::init(cx);
-        let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
-        let demo = std::env::var_os("IHEADPHONE_DEMO").is_some();
-        let (requests, events) = if demo {
-            (None, None)
-        } else {
-            let link = iheadphone_transport::start(Some("WH-1000XM5".into()));
-            (Some(link.requests), Some(link.events))
-        };
-        let app: Entity<HeadphoneApp> = cx.new(|_| {
-            let mut app = HeadphoneApp::new(requests);
-            #[cfg(target_os = "linux")]
-            {
-                app._media_bridge = Some(MediaBridge::start());
-            }
-            app
-        });
-
-        if let Some(events) = events {
-            let model = app.clone();
-            cx.spawn(async move |cx| {
-                while let Ok(event) = events.recv().await {
-                    model.update(cx, |app, cx| {
-                        app.apply_bluetooth_event(event);
-                        cx.notify();
-                    });
+    gpui_kit::application()
+        .with_assets(AppIcons)
+        .run(|cx: &mut App| {
+            gpui_kit::init(cx);
+            let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
+            let demo = std::env::var_os("IHEADPHONE_DEMO").is_some();
+            let (requests, events) = if demo {
+                (None, None)
+            } else {
+                let link = iheadphone_transport::start(Some("WH-1000XM5".into()));
+                (Some(link.requests), Some(link.events))
+            };
+            let app: Entity<HeadphoneApp> = cx.new(|_| {
+                let mut app = HeadphoneApp::new(requests);
+                #[cfg(target_os = "linux")]
+                {
+                    app._media_bridge = Some(MediaBridge::start());
                 }
-            })
-            .detach();
-        }
+                app
+            });
 
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                app_id: Some(APP_ID.into()),
-                icon: window_icon(),
-                ..Default::default()
-            },
-            cx,
-            |_, _| app,
-        )
-        .expect("failed to open iHeadphone window");
-    });
+            if let Some(events) = events {
+                let model = app.clone();
+                cx.spawn(async move |cx| {
+                    while let Ok(event) = events.recv().await {
+                        model.update(cx, |app, cx| {
+                            app.apply_bluetooth_event(event);
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_id: Some(APP_ID.into()),
+                    icon: window_icon(),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| app,
+            )
+            .expect("failed to open iHeadphone window");
+        });
 }
 
 #[cfg(test)]
