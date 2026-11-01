@@ -1,0 +1,55 @@
+pkgname=iheadphone
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native desktop controller for AirPods and Sony headphones"
+arch=('x86_64')
+url="https://github.com/oowl/iheadphone"
+license=('Apache-2.0')
+depends=(
+  'bluez'
+  'bluez-utils'
+  'dbus'
+  'fontconfig'
+  'freetype2'
+  'libnotify'
+  'libxcb'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'playerctl'
+  'systemd-libs'
+  'vulkan-icd-loader'
+  'wayland'
+)
+makedepends=('cargo' 'pkgconf')
+# Arch's C LTO flags produce a Wayland log shim archive that rust-lld cannot
+# consume. Rust release optimization remains enabled by Cargo.
+options=('!lto')
+_commit='d81c72ad6b063027811c1b05e6c5a4da6dde2d60'
+source=("${pkgname}-${_commit}.tar.gz::${url}/archive/${_commit}.tar.gz")
+sha256sums=('0ff71b9d8929cac75fba60df5d7858d208048935a1034fb407c3082d60bd2e49')
+
+prepare() {
+  cd "${srcdir}/${pkgname}-${_commit}"
+  cargo fetch --locked --target "${CARCH}-unknown-linux-gnu"
+}
+
+build() {
+  cd "${srcdir}/${pkgname}-${_commit}"
+  cargo build --release --frozen -p iheadphone-desktop
+}
+
+check() {
+  cd "${srcdir}/${pkgname}-${_commit}"
+  cargo test --release --frozen --workspace
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${_commit}"
+
+  install -Dm755 target/release/iheadphone \
+    "${pkgdir}/usr/bin/iheadphone"
+  install -Dm644 packaging/linux/io.github.iheadphone.iheadphone.desktop \
+    "${pkgdir}/usr/share/applications/io.github.iheadphone.iheadphone.desktop"
+  install -Dm644 apps/desktop/assets/iheadphone-icon-512.png \
+    "${pkgdir}/usr/share/icons/hicolor/512x512/apps/io.github.iheadphone.iheadphone.png"
+}
