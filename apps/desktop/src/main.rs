@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use std::process::Child;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, OnceLock, mpsc};
 
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::{
-    App, AppContext, Bounds, Context, Entity, FontWeight, IntoElement, Render, SharedString,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    App, AppContext, Bounds, Context, Entity, FontWeight, Image as GpuiImage, ImageFormat,
+    IntoElement, ObjectFit, Render, SharedString, Window, WindowBounds, WindowOptions, div, img,
+    prelude::*, px, rgb, size,
 };
 use iheadphone_domain::{DeviceKind, DeviceSnapshot, NoiseMode, mock_devices, sony_wh1000xm5};
 use iheadphone_sony_protocol::{
@@ -34,6 +35,26 @@ const ON_SECONDARY_CONTAINER: u32 = 0xdbe2f9;
 const TERTIARY_CONTAINER: u32 = 0x633b48;
 const ON_TERTIARY_CONTAINER: u32 = 0xffd9e2;
 const SUCCESS: u32 = 0xa7f0ba;
+const APP_ID: &str = "io.github.iheadphone.iheadphone";
+const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/iheadphone-icon.png");
+static APP_ICON_IMAGE: OnceLock<Arc<GpuiImage>> = OnceLock::new();
+
+fn app_icon_image() -> Arc<GpuiImage> {
+    APP_ICON_IMAGE
+        .get_or_init(|| {
+            Arc::new(GpuiImage::from_bytes(
+                ImageFormat::Png,
+                APP_ICON_BYTES.to_vec(),
+            ))
+        })
+        .clone()
+}
+
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    image::load_from_memory_with_format(APP_ICON_BYTES, image::ImageFormat::Png)
+        .ok()
+        .map(|image| Arc::new(image.into_rgba8()))
+}
 
 #[cfg(all(not(test), any(target_os = "linux", target_os = "macos")))]
 fn send_desktop_notification(title: &str, body: &str) {
@@ -44,7 +65,7 @@ fn send_desktop_notification(title: &str, body: &str) {
         .spawn(move || {
             #[cfg(target_os = "linux")]
             let result = Command::new("notify-send")
-                .args(["--app-name=iHeadphone", "--icon=audio-headphones"])
+                .args(["--app-name=iHeadphone", "--icon", APP_ID])
                 .arg(&title)
                 .arg(&body)
                 .stdin(Stdio::null())
@@ -625,16 +646,10 @@ impl HeadphoneApp {
                     .items_center()
                     .gap_3()
                     .child(
-                        div()
+                        img(app_icon_image())
                             .size(px(42.))
                             .rounded_xl()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(rgb(PRIMARY))
-                            .text_color(rgb(ON_PRIMARY))
-                            .font_weight(FontWeight::BOLD)
-                            .child("iH"),
+                            .object_fit(ObjectFit::Cover),
                     )
                     .child(
                         div()
@@ -1785,6 +1800,8 @@ fn main() {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                app_id: Some(APP_ID.into()),
+                icon: window_icon(),
                 ..Default::default()
             },
             cx,

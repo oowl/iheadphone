@@ -3147,6 +3147,7 @@ dependencies = [
  "iheadphone-domain",
  "iheadphone-sony-protocol",
  "iheadphone-transport",
+ "image",
 ]
 
 [[package]]

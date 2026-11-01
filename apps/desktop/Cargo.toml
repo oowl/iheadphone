@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 gpui-kit.workspace = true
+image.workspace = true
 iheadphone-domain.workspace = true
 iheadphone-sony-protocol.workspace = true
 iheadphone-transport.workspace = true

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=iHeadphone
+Comment=Control Sony headphones from your desktop
+Comment[zh_CN]=从桌面控制 Sony 耳机
+Exec=iheadphone
+Icon=io.github.iheadphone.iheadphone
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupNotify=true
+StartupWMClass=io.github.iheadphone.iheadphone

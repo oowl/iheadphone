@@ -17,3 +17,4 @@ iheadphone-domain = { path = "crates/domain" }
 iheadphone-sony-protocol = { path = "crates/sony-protocol" }
 iheadphone-transport = { path = "crates/transport" }
 gpui-kit = "=0.8.1"
+image = { version = "0.25.1", default-features = false, features = ["png"] }

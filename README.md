@@ -63,3 +63,14 @@ cargo fmt --check
 cargo test --workspace
 cargo check --workspace
 ```
+
+### Wayland desktop icon
+
+Wayland compositors resolve the window icon through the application's desktop ID rather than the
+X11 window-icon field. Install the development desktop entry and hicolor icon for the current user:
+
+```bash
+sh packaging/linux/install-desktop-integration.sh
+```
+
+The application ID and desktop filename are both `io.github.iheadphone.iheadphone`.
