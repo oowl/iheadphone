@@ -57,10 +57,12 @@ level and Focus on Voice, DSEE Extreme, Speak-to-Chat and its options, five-band
 and presets, firmware and codec readback, wear-sensor pause, automatic power off, the NC/Ambient
 button cycle, multipoint device readback and source switching, and software power off.
 
-On Linux, iHeadphone starts BlueZ's `mpris-proxy` while the app is running when its user service is
-not already active. This forwards AVRCP media-button commands from the headset to MPRIS players
-such as browsers and desktop music apps. Install the BlueZ tools package that provides
-`mpris-proxy` if your distribution separates it from BlueZ.
+On Linux, iHeadphone registers its own AVRCP player with BlueZ while the app is running, so headset
+media buttons reach MPRIS players such as browsers and desktop music apps. Headsets choose Play or
+Pause from playback state they track themselves, and AirPods keep sending Play once that state is
+stale; every Play, Pause, or Play/Pause press therefore toggles whatever is actually playing. Next and
+Previous go to the playing player. Do not run BlueZ's `mpris-proxy` alongside the app: its players
+register ahead of iHeadphone's and bring the stale state back.
 
 The XM5 does not always emit an AVRCP pause when Speak-to-Chat activates. iHeadphone also listens
 for Sony's private active/inactive conversation notifications and pauses the currently playing

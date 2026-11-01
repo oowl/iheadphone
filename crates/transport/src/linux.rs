@@ -18,6 +18,7 @@ use crate::{Device as DeviceKind, Event, Request};
 
 mod airpods;
 mod l2cap;
+mod media_player;
 
 const RETRY_CONNECT: [Duration; 4] = [
     Duration::from_millis(250),
@@ -61,6 +62,10 @@ pub fn start(
         .name("airpods-bluetooth".into())
         .spawn(move || airpods::run(airpods_rx, events))
         .expect("failed to start AirPods Bluetooth worker");
+    std::thread::Builder::new()
+        .name("headset-buttons".into())
+        .spawn(media_player::run)
+        .expect("failed to start headset button player");
 }
 
 fn run_sony(

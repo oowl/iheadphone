@@ -136,6 +136,9 @@ fn serve(
                 match iheadphone_airpods_protocol::parse(&buffer[..count]) {
                     Ok(updates) => {
                         for update in updates {
+                            if matches!(update, Update::Wearing(_)) {
+                                super::media_player::note_wear_change();
+                            }
                             let _ = events.send_blocking(Event::AirPodsUpdate(update));
                         }
                     }

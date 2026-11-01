@@ -1,6 +1,4 @@
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::process::Child;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock, mpsc};
@@ -195,7 +193,6 @@ fn send_desktop_notification(_device: BluetoothDevice, _title: &str, _body: &str
 
 #[cfg(target_os = "linux")]
 struct MediaBridge {
-    child: Option<Child>,
     paused_players: Vec<String>,
     speak_to_chat_active: bool,
     taken_off_active: bool,
@@ -231,36 +228,22 @@ fn conversation_volume(original: u8, state: AirPodsConversation) -> Option<u8> {
 #[cfg(target_os = "linux")]
 impl MediaBridge {
     fn start() -> Self {
-        let service_is_active = Command::new("systemctl")
-            .args(["--user", "is-active", "--quiet", "mpris-proxy.service"])
+        // Headset buttons go through the transport's own BlueZ player. An
+        // mpris-proxy registers players ahead of it and brings back the stale
+        // playback state that left a stem press able to pause but not resume.
+        let proxy_is_running = Command::new("pgrep")
+            .args(["-x", "mpris-proxy"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success());
-        if service_is_active {
-            return Self {
-                child: None,
-                paused_players: Vec::new(),
-                speak_to_chat_active: false,
-                taken_off_active: false,
-                volume_duck: None,
-            };
+        if proxy_is_running {
+            eprintln!(
+                "media: mpris-proxy is running and may take headset buttons from iHeadphone; stop it (for example `systemctl --user disable --now mpris-proxy`) if play/pause stops toggling"
+            );
         }
-
-        let child = Command::new("mpris-proxy")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .inspect_err(|error| {
-                eprintln!(
-                    "media: cannot start mpris-proxy; headset playback buttons may not reach applications: {error}"
-                );
-            })
-            .ok();
         Self {
-            child,
             paused_players: Vec::new(),
             speak_to_chat_active: false,
             taken_off_active: false,
@@ -422,10 +405,6 @@ impl MediaBridge {
 impl Drop for MediaBridge {
     fn drop(&mut self) {
         self.end_conversation();
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
     }
 }
 
