@@ -1,6 +1,4 @@
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::process::Child;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock, mpsc};
@@ -11,13 +9,17 @@ use gpui_kit::{
     IntoElement, ObjectFit, Render, SharedString, Window, WindowBounds, WindowOptions,
     assets::IconName, div, img, prelude::*, px, rgb, size,
 };
+#[cfg(target_os = "linux")]
+use iheadphone_airpods_protocol::Conversation as AirPodsConversation;
 use iheadphone_airpods_protocol::{
-    BatteryState as AirPodsBattery, ListeningMode as AirPodsListeningMode,
-    Microphone as AirPodsMicrophone, PodState, Setting as AirPodsSetting, Side as AirPodsSide,
-    Update as AirPodsUpdate, WearingState as AirPodsWearing,
+    BatteryState as AirPodsBattery, Capabilities as AirPodsCapabilities, DeviceInfo as AirPodsInfo,
+    ListeningMode as AirPodsListeningMode, ListeningModeCycle as AirPodsModeCycle,
+    Microphone as AirPodsMicrophone, Model as AirPodsModel, PodState, Setting as AirPodsSetting,
+    Side as AirPodsSide, Timing as AirPodsTiming, Update as AirPodsUpdate,
+    WearingState as AirPodsWearing,
 };
 use iheadphone_domain::{
-    DeviceKind, DeviceSnapshot, NoiseMode, airpods_pro2, mock_devices, sony_wh1000xm5,
+    DeviceKind, DeviceSnapshot, NoiseMode, airpods, mock_devices, sony_wh1000xm5,
 };
 use iheadphone_sony_protocol::{
     AutoOff, ConnectedDevice, EqPreset, Equalizer, Feature, ListeningMode, NoiseButton, Setting,
@@ -191,48 +193,139 @@ fn send_desktop_notification(_device: BluetoothDevice, _title: &str, _body: &str
 
 #[cfg(target_os = "linux")]
 struct MediaBridge {
-    child: Option<Child>,
     paused_players: Vec<String>,
     speak_to_chat_active: bool,
     taken_off_active: bool,
+    volume_duck: Option<VolumeDuck>,
+}
+
+/// Media volume lowered while the wearer speaks.
+#[cfg(target_os = "linux")]
+struct VolumeDuck {
+    sink: String,
+    original: u8,
+    applied: u8,
+}
+
+/// How far Conversation Awareness lowers the headphone sink.
+#[cfg(target_os = "linux")]
+const CONVERSATION_DUCK_DB: f32 = 15.0;
+
+/// The sink volume for a conversation state, or `None` once it has ended.
+#[cfg(target_os = "linux")]
+fn conversation_volume(original: u8, state: AirPodsConversation) -> Option<u8> {
+    let cut_db = match state {
+        AirPodsConversation::Speaking => CONVERSATION_DUCK_DB,
+        AirPodsConversation::Easing(step) => {
+            CONVERSATION_DUCK_DB * f32::from(5 - step.clamp(1, 4)) / 5.0
+        }
+        AirPodsConversation::Ended => return None,
+    };
+    // PipeWire maps volume percent to gain cubically: dB = 60 · log10(v).
+    Some((f32::from(original) * 10f32.powf(-cut_db / 60.0)).round() as u8)
 }
 
 #[cfg(target_os = "linux")]
 impl MediaBridge {
     fn start() -> Self {
-        let service_is_active = Command::new("systemctl")
-            .args(["--user", "is-active", "--quiet", "mpris-proxy.service"])
+        // Headset buttons go through the transport's own BlueZ player. An
+        // mpris-proxy registers players ahead of it and brings back the stale
+        // playback state that left a stem press able to pause but not resume.
+        let proxy_is_running = Command::new("pgrep")
+            .args(["-x", "mpris-proxy"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success());
-        if service_is_active {
-            return Self {
-                child: None,
-                paused_players: Vec::new(),
-                speak_to_chat_active: false,
-                taken_off_active: false,
-            };
+        if proxy_is_running {
+            eprintln!(
+                "media: mpris-proxy is running and may take headset buttons from iHeadphone; stop it (for example `systemctl --user disable --now mpris-proxy`) if play/pause stops toggling"
+            );
         }
-
-        let child = Command::new("mpris-proxy")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .inspect_err(|error| {
-                eprintln!(
-                    "media: cannot start mpris-proxy; headset playback buttons may not reach applications: {error}"
-                );
-            })
-            .ok();
         Self {
-            child,
             paused_players: Vec::new(),
             speak_to_chat_active: false,
             taken_off_active: false,
+            volume_duck: None,
         }
+    }
+
+    /// Lowers the Bluetooth sink while the wearer speaks and eases it back
+    /// afterwards. Returns whether media volume is now lowered.
+    fn set_conversation(&mut self, state: AirPodsConversation) -> bool {
+        if state == AirPodsConversation::Ended {
+            self.end_conversation();
+            return false;
+        }
+        if self.volume_duck.is_none() {
+            if state != AirPodsConversation::Speaking
+                || Self::players_with_status("Playing").is_empty()
+            {
+                return false;
+            }
+            let Some(sink) = Self::pactl(&["get-default-sink"])
+                .map(|sink| sink.trim().to_owned())
+                .filter(|sink| sink.starts_with("bluez_output."))
+            else {
+                return false;
+            };
+            let Some(original) = Self::sink_volume(&sink) else {
+                return false;
+            };
+            self.volume_duck = Some(VolumeDuck {
+                sink,
+                original,
+                applied: original,
+            });
+        }
+        let Some(duck) = self.volume_duck.as_mut() else {
+            return false;
+        };
+        // Leave the volume alone once the user has changed it themselves.
+        if Self::sink_volume(&duck.sink) != Some(duck.applied) {
+            self.volume_duck = None;
+            return false;
+        }
+        let Some(target) = conversation_volume(duck.original, state) else {
+            return false;
+        };
+        if Self::set_sink_volume(&duck.sink, target) {
+            duck.applied = target;
+        }
+        true
+    }
+
+    fn end_conversation(&mut self) {
+        let Some(duck) = self.volume_duck.take() else {
+            return;
+        };
+        if Self::sink_volume(&duck.sink) == Some(duck.applied) {
+            Self::set_sink_volume(&duck.sink, duck.original);
+        }
+    }
+
+    fn sink_volume(sink: &str) -> Option<u8> {
+        Self::pactl(&["get-sink-volume", sink])?
+            .split_whitespace()
+            .find_map(|word| word.strip_suffix('%')?.parse().ok())
+    }
+
+    fn set_sink_volume(sink: &str, percent: u8) -> bool {
+        Self::pactl(&["set-sink-volume", sink, &format!("{percent}%")]).is_some()
+    }
+
+    fn pactl(args: &[&str]) -> Option<String> {
+        let output = Command::new("pactl")
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn set_speak_to_chat_active(&mut self, active: bool) {
@@ -311,10 +404,7 @@ impl MediaBridge {
 #[cfg(target_os = "linux")]
 impl Drop for MediaBridge {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.end_conversation();
     }
 }
 
@@ -408,11 +498,56 @@ impl Default for SonyDetails {
 
 #[derive(Clone, Default)]
 struct AirPodsDetails {
+    model: Option<AirPodsModel>,
+    info: Option<AirPodsInfo>,
     battery: AirPodsBattery,
     wearing: Option<AirPodsWearing>,
     ear_detection: bool,
     one_bud_anc: bool,
     microphone: Option<AirPodsMicrophone>,
+    mode_cycle: Option<AirPodsModeCycle>,
+    adaptive_noise_level: Option<u8>,
+    press_speed: Option<AirPodsTiming>,
+    press_and_hold_duration: Option<AirPodsTiming>,
+    chime_volume: Option<u8>,
+    volume_swipe: Option<bool>,
+    volume_swipe_interval: Option<AirPodsTiming>,
+    personalized_volume: Option<bool>,
+}
+
+impl AirPodsDetails {
+    fn capabilities(&self) -> AirPodsCapabilities {
+        self.model
+            .map_or(AirPodsCapabilities::FULL, AirPodsModel::capabilities)
+    }
+}
+
+fn noise_mode_from_airpods(mode: AirPodsListeningMode) -> NoiseMode {
+    match mode {
+        AirPodsListeningMode::Off => NoiseMode::Off,
+        AirPodsListeningMode::NoiseCancelling => NoiseMode::NoiseCancelling,
+        AirPodsListeningMode::Transparency => NoiseMode::Transparency,
+        AirPodsListeningMode::Adaptive => NoiseMode::Adaptive,
+    }
+}
+
+fn apply_airpods_capabilities(device: &mut DeviceSnapshot, capabilities: AirPodsCapabilities) {
+    device.capabilities.noise_modes = capabilities
+        .listening_modes
+        .iter()
+        .copied()
+        .map(noise_mode_from_airpods)
+        .collect();
+    device.capabilities.conversation_awareness = capabilities.conversation_awareness;
+}
+
+/// Adaptive keeps three stops and rounds anything else to the nearest one.
+fn adaptive_noise_stop(level: u8) -> u8 {
+    match level {
+        0..=24 => 0,
+        25..=74 => 50,
+        _ => 100,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -446,7 +581,7 @@ impl HeadphoneApp {
             sony.noise_mode = NoiseMode::Off;
             let mut devices = vec![sony];
             #[cfg(target_os = "linux")]
-            devices.push(airpods_pro2(false));
+            devices.push(airpods(false));
             devices
         } else {
             mock_devices()
@@ -516,6 +651,22 @@ impl HeadphoneApp {
         &self.devices[self.selected]
     }
 
+    /// The name without a variant such as "(USB-C)", for narrow places.
+    fn device_short_name(&self, device: &DeviceSnapshot) -> &'static str {
+        let name = self.device_name(device);
+        name.split_once(" (").map_or(name, |(short, _)| short)
+    }
+
+    fn device_name(&self, device: &DeviceSnapshot) -> &'static str {
+        match device.kind {
+            DeviceKind::AirPods => self
+                .airpods
+                .model
+                .map_or(device.kind.display_name(), AirPodsModel::name),
+            DeviceKind::SonyWh1000Xm5 => device.kind.display_name(),
+        }
+    }
+
     fn send_setting(&self, setting: Setting) {
         if let Some(requests) = &self.requests {
             let _ = requests.send(BluetoothRequest::Sony(setting));
@@ -531,7 +682,7 @@ impl HeadphoneApp {
     fn device_index(&self, device: BluetoothDevice) -> Option<usize> {
         let kind = match device {
             BluetoothDevice::SonyWh1000Xm5 => DeviceKind::SonyWh1000Xm5,
-            BluetoothDevice::AirPods => DeviceKind::AirPodsPro2,
+            BluetoothDevice::AirPods => DeviceKind::AirPods,
         };
         self.devices.iter().position(|item| item.kind == kind)
     }
@@ -577,6 +728,7 @@ impl HeadphoneApp {
                 #[cfg(target_os = "linux")]
                 if let Some(bridge) = self._media_bridge.as_mut() {
                     bridge.clear_pause_reasons();
+                    bridge.end_conversation();
                 }
                 if was_connected {
                     let name = match kind {
@@ -596,6 +748,15 @@ impl HeadphoneApp {
                 };
                 let newly_connected = !self.devices[index].connected;
                 self.devices[index].connected = true;
+                if kind == BluetoothDevice::AirPods {
+                    // A different pair may have connected; let it report again.
+                    self.airpods = AirPodsDetails {
+                        battery: self.airpods.battery,
+                        ear_detection: self.airpods.ear_detection,
+                        ..AirPodsDetails::default()
+                    };
+                    apply_airpods_capabilities(&mut self.devices[index], AirPodsCapabilities::FULL);
+                }
                 self.backend_status = match self.language {
                     Language::English => format!("{name} hardware controls are live."),
                     Language::SimplifiedChinese => format!("{name} 硬件控制已启用。"),
@@ -742,14 +903,7 @@ impl HeadphoneApp {
                         }
                         .into();
                     }
-                    AirPodsUpdate::Mode(mode) => {
-                        device.noise_mode = match mode {
-                            AirPodsListeningMode::Off => NoiseMode::Off,
-                            AirPodsListeningMode::NoiseCancelling => NoiseMode::NoiseCancelling,
-                            AirPodsListeningMode::Transparency => NoiseMode::Transparency,
-                            AirPodsListeningMode::Adaptive => NoiseMode::Adaptive,
-                        };
-                    }
+                    AirPodsUpdate::Mode(mode) => device.noise_mode = noise_mode_from_airpods(mode),
                     AirPodsUpdate::ConversationAwareness(enabled) => {
                         device.conversation_awareness = enabled;
                     }
@@ -761,6 +915,55 @@ impl HeadphoneApp {
                     }
                     AirPodsUpdate::Microphone(microphone) => {
                         self.airpods.microphone = Some(microphone);
+                    }
+                    AirPodsUpdate::ListeningModeCycle(cycle) => {
+                        self.airpods.mode_cycle = Some(cycle);
+                    }
+                    AirPodsUpdate::AdaptiveNoiseLevel(level) => {
+                        self.airpods.adaptive_noise_level = Some(level);
+                    }
+                    AirPodsUpdate::PressSpeed(value) => self.airpods.press_speed = Some(value),
+                    AirPodsUpdate::PressAndHoldDuration(value) => {
+                        self.airpods.press_and_hold_duration = Some(value);
+                    }
+                    AirPodsUpdate::ChimeVolume(value) => self.airpods.chime_volume = Some(value),
+                    AirPodsUpdate::VolumeSwipe(value) => self.airpods.volume_swipe = Some(value),
+                    AirPodsUpdate::VolumeSwipeInterval(value) => {
+                        self.airpods.volume_swipe_interval = Some(value);
+                    }
+                    AirPodsUpdate::PersonalizedVolume(value) => {
+                        self.airpods.personalized_volume = Some(value);
+                    }
+                    AirPodsUpdate::Conversation(state) => {
+                        if !device.conversation_awareness {
+                            return;
+                        }
+                        #[cfg(target_os = "linux")]
+                        if let Some(bridge) = self._media_bridge.as_mut() {
+                            let was_lowered = bridge.volume_duck.is_some();
+                            let lowered = bridge.set_conversation(state);
+                            if lowered != was_lowered {
+                                self.backend_status = if lowered {
+                                    self.t(
+                                        "Conversation detected; media volume lowered.",
+                                        "检测到你在说话；已降低媒体音量。",
+                                    )
+                                } else {
+                                    self.t(
+                                        "Conversation ended; media volume restored.",
+                                        "对话结束；已恢复媒体音量。",
+                                    )
+                                }
+                                .into();
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = state;
+                    }
+                    AirPodsUpdate::DeviceInfo(info) => self.airpods.info = Some(info),
+                    AirPodsUpdate::Model(model) => {
+                        self.airpods.model = Some(model);
+                        apply_airpods_capabilities(device, model.capabilities());
                     }
                 }
             }
@@ -788,7 +991,7 @@ impl HeadphoneApp {
                     .size(px(36.))
                     .object_fit(ObjectFit::Contain)
                     .into_any_element(),
-                DeviceKind::AirPodsPro2 => div()
+                DeviceKind::AirPods => div()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -831,6 +1034,7 @@ impl HeadphoneApp {
                     .child(
                         div()
                             .size(px(40.))
+                            .flex_shrink_0()
                             .rounded_full()
                             .overflow_hidden()
                             .flex()
@@ -853,11 +1057,13 @@ impl HeadphoneApp {
                             .flex()
                             .flex_col()
                             .flex_1()
+                            .min_w(px(0.))
                             .gap_1()
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(device.kind.display_name()),
+                                    .truncate()
+                                    .child(self.device_short_name(device)),
                             )
                             .child(div().text_sm().text_color(rgb(ON_SURFACE_VARIANT)).child(
                                 if device.connected {
@@ -869,6 +1075,7 @@ impl HeadphoneApp {
                     )
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("{}%", device.battery_percent)),
@@ -997,7 +1204,7 @@ impl HeadphoneApp {
                             .mt_1()
                             .text_xl()
                             .font_weight(FontWeight::BOLD)
-                            .child(device.kind.display_name()),
+                            .child(self.device_name(device)),
                     ),
             )
             .child(
@@ -1078,7 +1285,7 @@ impl HeadphoneApp {
                 SURFACE_HIGH,
                 ON_SURFACE,
                 self.t("GETTING READY", "准备连接"),
-                self.t("Looking for your XM5.", "正在查找你的 XM5。"),
+                self.t("Looking for your headphones.", "正在查找你的耳机。"),
                 self.t(
                     "Turn on your headphones and connect them in system Bluetooth settings.",
                     "请打开耳机，并在系统蓝牙设置中连接。",
@@ -1242,7 +1449,7 @@ impl HeadphoneApp {
                                     this.send_setting(Setting::Mode(mode));
                                 }
                             }
-                            DeviceKind::AirPodsPro2 => {
+                            DeviceKind::AirPods => {
                                 let mode = match mode {
                                     NoiseMode::Off => AirPodsListeningMode::Off,
                                     NoiseMode::NoiseCancelling => {
@@ -1887,6 +2094,331 @@ impl HeadphoneApp {
         )
     }
 
+    fn airpods_mode_cycle_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let capabilities = self.airpods.capabilities();
+        let cycle = self.airpods.mode_cycle.unwrap_or_default();
+        let mut buttons = div().flex().flex_wrap().gap_2();
+        for mode in capabilities.listening_modes.iter().copied() {
+            buttons = buttons.child(Self::choice_button(
+                SharedString::from(format!("airpods-cycle-{mode:?}")),
+                SharedString::from(self.noise_mode_label(noise_mode_from_airpods(mode))),
+                cycle.contains(mode),
+                move |this| {
+                    let current = this.airpods.mode_cycle.unwrap_or_default();
+                    let included = !current.contains(mode);
+                    let next = current.with(mode, included);
+                    // The accessory needs at least two modes to cycle between.
+                    if !included && next.len() < 2 {
+                        return;
+                    }
+                    this.airpods.mode_cycle = Some(next);
+                    if next.len() >= 2 {
+                        this.send_airpods_setting(AirPodsSetting::ListeningModeCycle(next));
+                    }
+                },
+                cx,
+            ));
+        }
+        // AirPods do not include this setting in the dump sent on connect.
+        let controls =
+            div()
+                .mt_3()
+                .child(buttons)
+                .when(self.airpods.mode_cycle.is_none(), |controls| {
+                    controls.child(
+                        div()
+                            .mt_2()
+                            .text_xs()
+                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .child(self.t(
+                            "AirPods don't report the current selection; pick the modes to set it.",
+                            "AirPods 不会回报当前选择，选好模式后即会写入。",
+                        )),
+                    )
+                });
+        self.panel(
+            self.t("Press and hold", "按住切换"),
+            if capabilities.earbuds {
+                self.t(
+                    "Modes to cycle through when you press and hold the stem",
+                    "按住耳机柄时循环切换的模式，至少选择两项",
+                )
+            } else {
+                self.t(
+                    "Modes the noise control button cycles through",
+                    "降噪控制按钮循环切换的模式，至少选择两项",
+                )
+            },
+            controls,
+        )
+    }
+
+    fn airpods_adaptive_level_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let options = [
+            (0, self.t("More noise", "更多环境声")),
+            (50, self.t("Default", "默认")),
+            (100, self.t("Less noise", "更少环境声")),
+        ];
+        let current = self.airpods.adaptive_noise_level.map(adaptive_noise_stop);
+        let mut controls = div().flex().flex_wrap().gap_2().mt_3();
+        for (level, label) in options {
+            controls = controls.child(Self::choice_button(
+                SharedString::from(format!("airpods-adaptive-{level}")),
+                SharedString::from(label),
+                current == Some(level),
+                move |this| {
+                    this.airpods.adaptive_noise_level = Some(level);
+                    this.send_airpods_setting(AirPodsSetting::AdaptiveNoiseLevel(level));
+                },
+                cx,
+            ));
+        }
+        self.panel(
+            self.t("Adaptive audio", "自适应音频"),
+            self.t(
+                "How much surrounding noise Adaptive lets through",
+                "自适应模式下放进来的环境声多少",
+            ),
+            controls,
+        )
+    }
+
+    fn airpods_timing_row(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        option_labels: [&'static str; 3],
+        current: Option<AirPodsTiming>,
+        apply: fn(&mut AirPodsDetails, AirPodsTiming) -> AirPodsSetting,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut buttons = div().flex().gap_1();
+        for (timing, option_label) in AirPodsTiming::ALL.into_iter().zip(option_labels) {
+            buttons = buttons.child(Self::choice_button(
+                SharedString::from(format!("airpods-{id}-{timing:?}")),
+                SharedString::from(option_label),
+                current == Some(timing),
+                move |this| {
+                    let setting = apply(&mut this.airpods, timing);
+                    this.send_airpods_setting(setting);
+                },
+                cx,
+            ));
+        }
+        Self::settings_row(label, buttons)
+    }
+
+    fn settings_row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(OUTLINE).opacity(0.14))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(label),
+            )
+            .child(control)
+    }
+
+    fn airpods_controls_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let capabilities = self.airpods.capabilities();
+        let longer = [
+            self.t("Default", "默认"),
+            self.t("Longer", "较长"),
+            self.t("Longest", "最长"),
+        ];
+        let mut rows = div().mt_2();
+        if capabilities.press_timing {
+            rows = rows
+                .child(self.airpods_timing_row(
+                    "press-speed",
+                    self.t("Press speed", "按压速度"),
+                    [
+                        self.t("Default", "默认"),
+                        self.t("Slower", "较慢"),
+                        self.t("Slowest", "最慢"),
+                    ],
+                    self.airpods.press_speed,
+                    |airpods, timing| {
+                        airpods.press_speed = Some(timing);
+                        AirPodsSetting::PressSpeed(timing)
+                    },
+                    cx,
+                ))
+                .child(self.airpods_timing_row(
+                    "hold-duration",
+                    self.t("Press and hold duration", "按住时长"),
+                    longer,
+                    self.airpods.press_and_hold_duration,
+                    |airpods, timing| {
+                        airpods.press_and_hold_duration = Some(timing);
+                        AirPodsSetting::PressAndHoldDuration(timing)
+                    },
+                    cx,
+                ));
+        }
+        if capabilities.volume_swipe {
+            rows = rows.child(self.airpods_timing_row(
+                "swipe-interval",
+                self.t("Pause between volume swipes", "音量滑动间隔"),
+                longer,
+                self.airpods.volume_swipe_interval,
+                |airpods, timing| {
+                    airpods.volume_swipe_interval = Some(timing);
+                    AirPodsSetting::VolumeSwipeInterval(timing)
+                },
+                cx,
+            ));
+        }
+        if capabilities.chime_volume {
+            let step = |delta: i8| {
+                move |this: &mut Self| {
+                    let Some(volume) = this.airpods.chime_volume else {
+                        return;
+                    };
+                    let volume = volume.saturating_add_signed(delta).min(100);
+                    this.airpods.chime_volume = Some(volume);
+                    this.send_airpods_setting(AirPodsSetting::ChimeVolume(volume));
+                }
+            };
+            let volume = self.airpods.chime_volume;
+            rows = rows.child(Self::settings_row(
+                self.t("Tone volume", "提示音音量"),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Self::choice_button(
+                        "airpods-chime-down".into(),
+                        "−".into(),
+                        false,
+                        step(-10),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .w(px(120.))
+                            .h(px(8.))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .bg(rgb(SURFACE_HIGH))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(gpui_kit::relative(f32::from(volume.unwrap_or(0)) / 100.0))
+                                    .rounded_full()
+                                    .bg(rgb(PRIMARY)),
+                            ),
+                    )
+                    .child(Self::choice_button(
+                        "airpods-chime-up".into(),
+                        "+".into(),
+                        false,
+                        step(10),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .child(
+                                volume.map_or_else(|| "—".into(), |volume| format!("{volume}%")),
+                            ),
+                    ),
+            ));
+        }
+        self.panel(
+            self.t("Controls and tones", "按压与提示音"),
+            self.t(
+                "Timing for presses and swipes, and the volume of AirPods tones",
+                "按压、滑动的时间容差，以及 AirPods 提示音的音量",
+            ),
+            rows,
+        )
+    }
+
+    fn airpods_info_panel(&self, connected: bool) -> impl IntoElement {
+        let info = self.airpods.info.as_ref();
+        let pending = if connected {
+            self.t("Reading…", "读取中…")
+        } else {
+            "—"
+        };
+        let field = |value: Option<&String>| -> SharedString {
+            value.map_or_else(|| pending.into(), |value| value.clone().into())
+        };
+        let model = self.airpods.model.map_or_else(
+            || match info.and_then(|info| info.name.as_ref()) {
+                Some(_) => self.t("Unrecognised model", "未识别的型号").into(),
+                None => pending.into(),
+            },
+            |model| SharedString::from(model.name()),
+        );
+        let mut rows = vec![
+            (self.t("Model", "型号"), model),
+            (
+                self.t("Model number", "型号编号"),
+                field(info.and_then(|info| info.model_number.as_ref())),
+            ),
+            (
+                self.t("Firmware", "固件版本"),
+                field(info.and_then(|info| info.firmware.as_ref())),
+            ),
+            (
+                self.t("Serial number", "序列号"),
+                field(info.and_then(|info| info.serial_number.as_ref())),
+            ),
+        ];
+        if self.airpods.capabilities().earbuds {
+            rows.push((
+                self.t("Left serial", "左耳序列号"),
+                field(info.and_then(|info| info.left_serial_number.as_ref())),
+            ));
+            rows.push((
+                self.t("Right serial", "右耳序列号"),
+                field(info.and_then(|info| info.right_serial_number.as_ref())),
+            ));
+        }
+        let mut cards = div().grid().grid_cols(3).gap_2().mt_3();
+        for (label, value) in rows {
+            cards = cards.child(
+                div()
+                    .p_3()
+                    .rounded_2xl()
+                    .bg(rgb(SURFACE_HIGH))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .child(value),
+                    ),
+            );
+        }
+        self.panel(
+            self.t("Device information", "设备信息"),
+            self.t(
+                "Identification reported by the AirPods on connect",
+                "AirPods 连接时回报的识别信息",
+            ),
+            cards,
+        )
+    }
+
     fn eq_action(index: usize, delta: i8, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id(SharedString::from(format!("eq-{index}-{delta}")))
@@ -2327,9 +2859,11 @@ impl Render for HeadphoneApp {
         let selected = self.selected;
         let page = self.detail_page;
         let sony_over_ear = device.kind.uses_sony_over_ear_layout();
-        let show_features = (page == DetailPage::Overview
-            && device.kind != DeviceKind::AirPodsPro2)
-            || (page == DetailPage::Device && device.kind == DeviceKind::AirPodsPro2);
+        let is_airpods = device.kind == DeviceKind::AirPods;
+        let airpods_capabilities = self.airpods.capabilities();
+        let has_noise_modes = !device.capabilities.noise_modes.is_empty();
+        let show_features = (page == DetailPage::Overview && device.kind != DeviceKind::AirPods)
+            || (page == DetailPage::Device && device.kind == DeviceKind::AirPods);
         let mut features = div().grid().grid_cols(2).gap_2().mt_2();
         if device.capabilities.equalizer && device.kind != DeviceKind::SonyWh1000Xm5 {
             features = features.child(self.feature_card(
@@ -2411,14 +2945,18 @@ impl Render for HeadphoneApp {
                 move |this| {
                     let enabled = !this.devices[selected].conversation_awareness;
                     this.devices[selected].conversation_awareness = enabled;
-                    if this.devices[selected].kind == DeviceKind::AirPodsPro2 {
+                    if this.devices[selected].kind == DeviceKind::AirPods {
                         this.send_airpods_setting(AirPodsSetting::ConversationAwareness(enabled));
+                        #[cfg(target_os = "linux")]
+                        if let (false, Some(bridge)) = (enabled, this._media_bridge.as_mut()) {
+                            bridge.end_conversation();
+                        }
                     }
                 },
                 cx,
             ));
         }
-        if device.kind == DeviceKind::AirPodsPro2 {
+        if is_airpods && airpods_capabilities.ear_detection {
             features = features.child(self.feature_card(
                 self.t("Automatic ear detection", "自动入耳检测"),
                 self.t(
@@ -2433,6 +2971,40 @@ impl Render for HeadphoneApp {
                 },
                 cx,
             ));
+        }
+        if is_airpods && airpods_capabilities.personalized_volume {
+            features = features.child(self.feature_card(
+                self.t("Personalized volume", "个性化音量"),
+                self.t(
+                    "Adjust media volume to your environment",
+                    "根据环境和使用习惯自动调整媒体音量",
+                ),
+                self.airpods.personalized_volume.unwrap_or(false),
+                |this| {
+                    let enabled = !this.airpods.personalized_volume.unwrap_or(false);
+                    this.airpods.personalized_volume = Some(enabled);
+                    this.send_airpods_setting(AirPodsSetting::PersonalizedVolume(enabled));
+                },
+                cx,
+            ));
+        }
+        if is_airpods && airpods_capabilities.volume_swipe {
+            features = features.child(self.feature_card(
+                self.t("Volume swipe", "滑动调节音量"),
+                self.t(
+                    "Swipe the stem up or down to change volume",
+                    "在耳机柄上下滑动调节音量",
+                ),
+                self.airpods.volume_swipe.unwrap_or(false),
+                |this| {
+                    let enabled = !this.airpods.volume_swipe.unwrap_or(false);
+                    this.airpods.volume_swipe = Some(enabled);
+                    this.send_airpods_setting(AirPodsSetting::VolumeSwipe(enabled));
+                },
+                cx,
+            ));
+        }
+        if is_airpods && airpods_capabilities.one_bud_anc {
             features = features.child(self.feature_card(
                 self.t("Noise cancellation with one AirPod", "单只 AirPods 降噪"),
                 self.t(
@@ -2479,18 +3051,23 @@ impl Render for HeadphoneApp {
                                     }),
                             )
                         })
-                        .when(
-                            page == DetailPage::Overview && device.kind == DeviceKind::AirPodsPro2,
-                            |content| {
-                                content
-                                    .child(self.airpods_hero())
-                                    .child(div().mt_3().child(self.mode_controls(&device, cx)))
-                            },
-                        )
+                        .when(page == DetailPage::Overview && is_airpods, |content| {
+                            content
+                                .when(airpods_capabilities.earbuds, |content| {
+                                    content.child(self.airpods_hero())
+                                })
+                                .when(!airpods_capabilities.earbuds, |content| {
+                                    content.child(self.hero(&device))
+                                })
+                                .when(has_noise_modes, |content| {
+                                    content
+                                        .child(div().mt_3().child(self.mode_controls(&device, cx)))
+                                })
+                        })
                         .when(
                             page == DetailPage::Overview
                                 && !sony_over_ear
-                                && device.kind != DeviceKind::AirPodsPro2,
+                                && device.kind != DeviceKind::AirPods,
                             |content| content.child(self.hero(&device)),
                         )
                         .when(page == DetailPage::Sound && sony_over_ear, |content| {
@@ -2506,14 +3083,28 @@ impl Render for HeadphoneApp {
                                 )
                                 .child(div().mt_3().child(self.equalizer_panel(cx)))
                         })
-                        .when(
-                            page == DetailPage::Sound && device.kind == DeviceKind::AirPodsPro2,
-                            |content| {
-                                content
-                                    .child(self.mode_controls(&device, cx))
-                                    .child(div().mt_3().child(self.airpods_settings_panel(cx)))
-                            },
-                        )
+                        .when(page == DetailPage::Sound && is_airpods, |content| {
+                            content
+                                .when(has_noise_modes, |content| {
+                                    content.child(self.mode_controls(&device, cx))
+                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_3()
+                                        .mt_3()
+                                        .when(airpods_capabilities.mode_cycle(), |row| {
+                                            row.child(self.airpods_mode_cycle_panel(cx))
+                                        })
+                                        .when(airpods_capabilities.adaptive_noise_level, |row| {
+                                            row.child(self.airpods_adaptive_level_panel(cx))
+                                        }),
+                                )
+                                .when(airpods_capabilities.microphone_selection, |content| {
+                                    content
+                                        .child(div().mt_3().child(self.airpods_settings_panel(cx)))
+                                })
+                        })
                         .when(
                             page == DetailPage::Device && device.kind == DeviceKind::SonyWh1000Xm5,
                             |content| {
@@ -2535,10 +3126,25 @@ impl Render for HeadphoneApp {
                                 )
                             },
                         )
-                        .when(
-                            page == DetailPage::Device && device.kind == DeviceKind::AirPodsPro2,
-                            |content| content.child(self.airpods_settings_panel(cx)),
-                        )
+                        .when(page == DetailPage::Device && is_airpods, |content| {
+                            let capabilities = airpods_capabilities;
+                            content
+                                .child(self.airpods_info_panel(device.connected))
+                                .when(
+                                    capabilities.press_timing
+                                        || capabilities.volume_swipe
+                                        || capabilities.chime_volume,
+                                    |content| {
+                                        content.child(
+                                            div().mt_3().child(self.airpods_controls_panel(cx)),
+                                        )
+                                    },
+                                )
+                                .when(airpods_capabilities.microphone_selection, |content| {
+                                    content
+                                        .child(div().mt_3().child(self.airpods_settings_panel(cx)))
+                                })
+                        })
                         .when(show_features, |content| content.child(features)),
                 )
             })
@@ -2674,7 +3280,7 @@ mod tests {
         let airpods = app
             .devices
             .iter()
-            .find(|device| device.kind == DeviceKind::AirPodsPro2)
+            .find(|device| device.kind == DeviceKind::AirPods)
             .unwrap();
         assert!(airpods.connected);
         assert_eq!(airpods.battery_percent, 70);
@@ -2691,6 +3297,109 @@ mod tests {
                 AirPodsListeningMode::Transparency
             )))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn adapts_airpods_controls_to_the_reported_model() {
+        let (requests, receiver) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+        app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::AirPods,
+            name: "Max".into(),
+        });
+        app.apply_bluetooth_event(BluetoothEvent::AirPodsUpdate(AirPodsUpdate::Model(
+            AirPodsModel::AirPodsMax,
+        )));
+        app.apply_bluetooth_event(BluetoothEvent::AirPodsUpdate(AirPodsUpdate::DeviceInfo(
+            AirPodsInfo {
+                model_number: Some("A2096".into()),
+                ..AirPodsInfo::default()
+            },
+        )));
+        let index = app.device_index(BluetoothDevice::AirPods).unwrap();
+        let airpods = &app.devices[index];
+        assert_eq!(app.device_name(airpods), "AirPods Max");
+        app.airpods.model = Some(AirPodsModel::AirPodsPro2UsbC);
+        let airpods = &app.devices[index];
+        assert_eq!(app.device_name(airpods), "AirPods Pro 2 (USB-C)");
+        assert_eq!(app.device_short_name(airpods), "AirPods Pro 2");
+        app.airpods.model = Some(AirPodsModel::AirPodsMax);
+        assert!(
+            !airpods
+                .capabilities
+                .noise_modes
+                .contains(&NoiseMode::Adaptive)
+        );
+        assert!(!airpods.capabilities.conversation_awareness);
+        assert!(!app.airpods.capabilities().earbuds);
+
+        app.apply_bluetooth_event(BluetoothEvent::AirPodsUpdate(
+            AirPodsUpdate::AdaptiveNoiseLevel(60),
+        ));
+        assert_eq!(
+            app.airpods.adaptive_noise_level.map(adaptive_noise_stop),
+            Some(50)
+        );
+
+        // Reconnecting forgets the previous pair until it identifies itself.
+        app.apply_bluetooth_event(BluetoothEvent::Disconnected(BluetoothDevice::AirPods));
+        app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::AirPods,
+            name: "AirPods".into(),
+        });
+        assert_eq!(app.airpods.model, None);
+        assert_eq!(app.airpods.info, None);
+        assert_eq!(app.devices[index].capabilities.noise_modes.len(), 4);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn conversation_lowers_media_and_eases_it_back() {
+        let speaking = conversation_volume(80, AirPodsConversation::Speaking).unwrap();
+        assert_eq!(speaking, 45, "15 dB below 80% on PipeWire's cubic curve");
+        let easing: Vec<_> = (1..=4)
+            .map(|step| conversation_volume(80, AirPodsConversation::Easing(step)).unwrap())
+            .collect();
+        assert!(easing.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(speaking < easing[0] && easing[3] < 80);
+        assert_eq!(conversation_volume(80, AirPodsConversation::Ended), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stores_airpods_control_settings_and_forgets_them_on_reconnect() {
+        let (requests, _receiver) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+        let connected = BluetoothEvent::Connected {
+            device: BluetoothDevice::AirPods,
+            name: "AirPods Pro".into(),
+        };
+        app.apply_bluetooth_event(connected.clone());
+        for update in [
+            AirPodsUpdate::PressSpeed(AirPodsTiming::Longer),
+            AirPodsUpdate::PressAndHoldDuration(AirPodsTiming::Longest),
+            AirPodsUpdate::ChimeVolume(80),
+            AirPodsUpdate::VolumeSwipe(true),
+            AirPodsUpdate::VolumeSwipeInterval(AirPodsTiming::Default),
+            AirPodsUpdate::PersonalizedVolume(false),
+        ] {
+            app.apply_bluetooth_event(BluetoothEvent::AirPodsUpdate(update));
+        }
+        assert_eq!(app.airpods.press_speed, Some(AirPodsTiming::Longer));
+        assert_eq!(
+            app.airpods.press_and_hold_duration,
+            Some(AirPodsTiming::Longest)
+        );
+        assert_eq!(app.airpods.chime_volume, Some(80));
+        assert_eq!(app.airpods.volume_swipe, Some(true));
+        assert_eq!(app.airpods.personalized_volume, Some(false));
+
+        app.apply_bluetooth_event(BluetoothEvent::Disconnected(BluetoothDevice::AirPods));
+        app.apply_bluetooth_event(connected);
+        assert_eq!(app.airpods.chime_volume, None);
+        assert_eq!(app.airpods.press_speed, None);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use futures::{
     stream::{BoxStream, SelectAll},
 };
 use iheadphone_airpods_protocol::{
-    AAP_PSM, BatteryState, ProximityKeys, Setting, address_resolves, encode_setting,
+    AAP_PSM, BatteryState, Model, ProximityKeys, Setting, Update, address_resolves, encode_setting,
     initialization_packets, parse_case_advertisement, parse_proximity_keys,
 };
 
@@ -36,7 +36,7 @@ pub fn run(requests: mpsc::Receiver<Setting>, events: async_channel::Sender<Even
     let mut searching = false;
     loop {
         let candidate = runtime.block_on(find_connected());
-        if let Some((device, name)) = candidate {
+        if let Some((device, name, model)) = candidate {
             match connect_with_retry(&device, &requests) {
                 Ok(stream) => {
                     failures = 0;
@@ -45,6 +45,9 @@ pub fn run(requests: mpsc::Receiver<Setting>, events: async_channel::Sender<Even
                         device: DeviceKind::AirPods,
                         name,
                     });
+                    if let Some(model) = model {
+                        let _ = events.send_blocking(Event::AirPodsUpdate(Update::Model(model)));
+                    }
                     if !serve(&stream, &requests, &events, &proximity_keys) {
                         return;
                     }
@@ -133,6 +136,9 @@ fn serve(
                 match iheadphone_airpods_protocol::parse(&buffer[..count]) {
                     Ok(updates) => {
                         for update in updates {
+                            if matches!(update, Update::Wearing(_)) {
+                                super::media_player::note_wear_change();
+                            }
                             let _ = events.send_blocking(Event::AirPodsUpdate(update));
                         }
                     }
@@ -315,17 +321,15 @@ async fn publish_case(
     *last_case = Some(value);
     eprintln!("bluetooth: AirPods case battery {level}%");
     let _ = events
-        .send(Event::AirPodsUpdate(
-            iheadphone_airpods_protocol::Update::Battery(BatteryState {
-                case: Some(level),
-                case_charging: advertisement.case_charging,
-                ..BatteryState::default()
-            }),
-        ))
+        .send(Event::AirPodsUpdate(Update::Battery(BatteryState {
+            case: Some(level),
+            case_charging: advertisement.case_charging,
+            ..BatteryState::default()
+        })))
         .await;
 }
 
-async fn find_connected() -> Option<(Device, String)> {
+async fn find_connected() -> Option<(Device, String, Option<Model>)> {
     let session = bluer::Session::new().await.ok()?;
     for device in super::devices(&session).await {
         if !matches!(device.is_paired().await, Ok(true))
@@ -337,20 +341,24 @@ async fn find_connected() -> Option<(Device, String)> {
             continue;
         };
         let named_airpods = name.to_ascii_lowercase().contains("airpods");
-        let apple_headphones = device
+        let apple_product = device
             .modalias()
             .await
             .ok()
             .flatten()
-            .is_some_and(|modalias| modalias.vendor == 0x004c)
-            && device
-                .icon()
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|icon| icon == "audio-headphones");
+            .filter(|modalias| modalias.vendor == 0x004c)
+            .map(|modalias| modalias.product);
+        let model = apple_product.and_then(Model::from_product_id);
+        let apple_headphones = model.is_some()
+            || apple_product.is_some()
+                && device
+                    .icon()
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|icon| icon == "audio-headphones");
         if named_airpods || apple_headphones {
-            return Some((device, name));
+            return Some((device, name, model));
         }
     }
     None
