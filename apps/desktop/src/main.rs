@@ -3594,6 +3594,8 @@ fn main() {
         .with_assets(AppIcons)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
+            #[cfg(target_os = "macos")]
+            cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
             let demo = std::env::var_os("IHEADPHONE_DEMO").is_some();
             let (requests, events) = if demo {
                 (None, None)
@@ -3682,19 +3684,27 @@ fn main() {
                 .detach();
             }
 
-            #[cfg(target_os = "macos")]
-            let menu_preview = app.clone();
-            if !(cfg!(target_os = "macos")
-                && demo
-                && std::env::var_os("IHEADPHONE_MENU_PREVIEW_WINDOW").is_some())
-            {
-                open_or_activate_main_window(app, cx);
-            }
+            #[cfg(not(target_os = "macos"))]
+            open_or_activate_main_window(app, cx);
             #[cfg(target_os = "macos")]
             {
-                cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
+                // Start with only the status item. Creating the main window here
+                // also brings it forward when the popover activates the app.
+                // Explicit UI-preview flags may still open the full controller.
+                let preview_popover =
+                    demo && std::env::var_os("IHEADPHONE_MENU_PREVIEW_WINDOW").is_some();
+                let open_main_window = [
+                    "IHEADPHONE_OPEN_MAIN_WINDOW",
+                    "IHEADPHONE_OPEN_SETTINGS",
+                    "IHEADPHONE_OPEN_DEVICE",
+                ]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some());
+                if open_main_window && !preview_popover {
+                    open_or_activate_main_window(app.clone(), cx);
+                }
                 if std::env::var_os("IHEADPHONE_OPEN_POPOVER").is_some() {
-                    menu_preview.update(cx, |app, _| {
+                    app.update(cx, |app, _| {
                         if let Some(menu_bar) = app.menu_bar.as_ref() {
                             menu_bar.show();
                         }
