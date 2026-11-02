@@ -138,12 +138,16 @@ Release images use an ad-hoc signature until a Developer ID certificate is confi
 therefore ask the user to confirm the first launch. Set `IHEADPHONE_CODESIGN_IDENTITY` when running
 the packaging script with an installed Developer ID certificate.
 
-## Language
+## Appearance and language
 
 Open **Settings** from the bottom of the sidebar and choose **English** or **简体中文**. The whole
 interface switches immediately and remembers the selection across restarts. On Linux the preference
 is stored under `$XDG_CONFIG_HOME/iheadphone` (or `~/.config/iheadphone`); on macOS it is stored in
 `~/Library/Application Support/iHeadphone`.
+
+The same Settings page offers **Follow device**, **Light**, and **Dark** appearance options. The
+choice is remembered across restarts; Follow device also updates live when the operating system
+switches appearance.
 
 For UI development on macOS, set `IHEADPHONE_OPEN_MAIN_WINDOW=1` to show the main window on launch.
 Set `IHEADPHONE_OPEN_SETTINGS=1` to open directly on the settings page, or
