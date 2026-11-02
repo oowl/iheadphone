@@ -6,8 +6,8 @@ use std::sync::{Arc, OnceLock, mpsc};
 use gpui_kit::component::{Icon, scroll::ScrollableElement};
 use gpui_kit::{
     App, AppContext, Bounds, Context, Entity, FontWeight, Image as GpuiImage, ImageFormat,
-    IntoElement, ObjectFit, Render, SharedString, Window, WindowBounds, WindowOptions,
-    assets::IconName, div, img, prelude::*, px, rgb, size,
+    IntoElement, ObjectFit, Render, SharedString, Window, WindowAppearance, WindowBounds,
+    WindowOptions, assets::IconName, div, img, prelude::*, px, rgb, size,
 };
 #[cfg(target_os = "linux")]
 use iheadphone_airpods_protocol::Conversation as AirPodsConversation;
@@ -37,28 +37,82 @@ use macos_menu_bar::{
     set_output_volume,
 };
 
-// Material 3 Expressive dark color roles.
-const CANVAS: u32 = 0x111014;
-const SURFACE: u32 = 0x1b1b1f;
-const SURFACE_CONTAINER: u32 = 0x211f26;
-const SURFACE_HIGH: u32 = 0x2b2930;
-const ON_SURFACE: u32 = 0xe8e1e9;
-const ON_SURFACE_VARIANT: u32 = 0xcac4d0;
-const OUTLINE: u32 = 0x948f99;
-const PRIMARY: u32 = 0xcfbdff;
-const ON_PRIMARY: u32 = 0x382b67;
-const PRIMARY_CONTAINER: u32 = 0x4e3f78;
-const ON_PRIMARY_CONTAINER: u32 = 0xeadcff;
-const SECONDARY_CONTAINER: u32 = 0x3e4759;
-const ON_SECONDARY_CONTAINER: u32 = 0xdbe2f9;
-const TERTIARY_CONTAINER: u32 = 0x633b48;
-const ON_TERTIARY_CONTAINER: u32 = 0xffd9e2;
-const SUCCESS: u32 = 0xa7f0ba;
-const AIRPODS_WORN: u32 = 0x70e1a1;
-const AIRPODS_CHARGING: u32 = 0xb79cff;
-const AIRPODS_CASE: u32 = 0x88b8ff;
-const SONY_MODE: u32 = 0xf18ae8;
-const SONY_CODEC: u32 = 0x78b0ff;
+/// A small semantic palette keeps every screen visually consistent and lets
+/// status colors retain enough contrast in both appearances.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Palette {
+    canvas: u32,
+    surface: u32,
+    surface_container: u32,
+    surface_high: u32,
+    on_surface: u32,
+    on_surface_variant: u32,
+    outline: u32,
+    primary: u32,
+    on_primary: u32,
+    primary_container: u32,
+    on_primary_container: u32,
+    secondary_container: u32,
+    on_secondary_container: u32,
+    tertiary_container: u32,
+    on_tertiary_container: u32,
+    success: u32,
+    airpods_worn: u32,
+    airpods_charging: u32,
+    airpods_case: u32,
+    sony_mode: u32,
+    sony_codec: u32,
+}
+
+impl Palette {
+    const DARK: Self = Self {
+        canvas: 0x101216,
+        surface: 0x17191f,
+        surface_container: 0x1e2128,
+        surface_high: 0x2a2e38,
+        on_surface: 0xf3f5f8,
+        on_surface_variant: 0xb3bac7,
+        outline: 0x747d8d,
+        primary: 0x9aafff,
+        on_primary: 0x12204b,
+        primary_container: 0x293968,
+        on_primary_container: 0xe0e6ff,
+        secondary_container: 0x293647,
+        on_secondary_container: 0xdce9ff,
+        tertiary_container: 0x52303c,
+        on_tertiary_container: 0xffdbe5,
+        success: 0x79d99a,
+        airpods_worn: 0x70d6a0,
+        airpods_charging: 0xb8a0ff,
+        airpods_case: 0x83b6ff,
+        sony_mode: 0xf099e7,
+        sony_codec: 0x7db2ff,
+    };
+
+    const LIGHT: Self = Self {
+        canvas: 0xf6f7fb,
+        surface: 0xedeff5,
+        surface_container: 0xffffff,
+        surface_high: 0xe7eaf1,
+        on_surface: 0x191b22,
+        on_surface_variant: 0x5f6673,
+        outline: 0x747d8d,
+        primary: 0x5065d6,
+        on_primary: 0xffffff,
+        primary_container: 0xdfe5ff,
+        on_primary_container: 0x203477,
+        secondary_container: 0xe4edf9,
+        on_secondary_container: 0x263950,
+        tertiary_container: 0xf9e2e9,
+        on_tertiary_container: 0x69263d,
+        success: 0x167a3f,
+        airpods_worn: 0x137a4a,
+        airpods_charging: 0x6d4fc7,
+        airpods_case: 0x326ab8,
+        sony_mode: 0xa13a95,
+        sony_codec: 0x3267b4,
+    };
+}
 const APP_ID: &str = "io.github.iheadphone.iheadphone";
 
 // Icons render only when their SVGs are registered as assets; embed just the
@@ -485,6 +539,59 @@ impl Language {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ThemePreference {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
+impl ThemePreference {
+    fn load() -> Self {
+        let Some(path) = Self::settings_path() else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(path).as_deref().map(str::trim) {
+            Ok("light") => Self::Light,
+            Ok("dark") => Self::Dark,
+            _ => Self::System,
+        }
+    }
+
+    fn save(self) {
+        let Some(path) = Self::settings_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return;
+        }
+        let value = match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::System => "system",
+        };
+        let _ = std::fs::write(path, value);
+    }
+
+    fn settings_path() -> Option<PathBuf> {
+        let mut path = Language::settings_path()?;
+        path.set_file_name("theme");
+        Some(path)
+    }
+
+    fn palette(self, system_dark: bool) -> Palette {
+        match self {
+            Self::Light => Palette::LIGHT,
+            Self::Dark => Palette::DARK,
+            Self::System if system_dark => Palette::DARK,
+            Self::System => Palette::LIGHT,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SonyDetails {
     charging: bool,
@@ -662,6 +769,9 @@ struct HeadphoneApp {
     sony: SonyDetails,
     airpods: AirPodsDetails,
     language: Language,
+    theme: ThemePreference,
+    palette: Palette,
+    system_dark: bool,
     show_settings: bool,
     detail_page: DetailPage,
     #[cfg(target_os = "linux")]
@@ -674,6 +784,7 @@ impl HeadphoneApp {
     fn new(requests: Option<mpsc::Sender<BluetoothRequest>>) -> Self {
         let hardware = requests.is_some();
         let language = Language::load();
+        let theme = ThemePreference::load();
         let mut devices = if hardware { Vec::new() } else { mock_devices() };
         let airpods_details = if hardware {
             AirPodsDetails {
@@ -726,6 +837,9 @@ impl HeadphoneApp {
             },
             airpods: airpods_details,
             language,
+            theme,
+            palette: theme.palette(false),
+            system_dark: false,
             show_settings: std::env::var_os("IHEADPHONE_OPEN_SETTINGS").is_some(),
             detail_page,
             #[cfg(target_os = "linux")]
@@ -1365,12 +1479,12 @@ impl HeadphoneApp {
                     .rounded_3xl()
                     .cursor_pointer()
                     .when(selected, |e| {
-                        e.bg(rgb(PRIMARY_CONTAINER))
-                            .text_color(rgb(ON_PRIMARY_CONTAINER))
+                        e.bg(rgb(self.palette.primary_container))
+                            .text_color(rgb(self.palette.on_primary_container))
                     })
                     .when(!selected, |e| {
-                        e.bg(rgb(SURFACE_CONTAINER))
-                            .hover(|e| e.bg(rgb(SURFACE_HIGH)))
+                        e.bg(rgb(self.palette.surface_container))
+                            .hover(|e| e.bg(rgb(self.palette.surface_high)))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = index;
@@ -1388,14 +1502,14 @@ impl HeadphoneApp {
                             .items_center()
                             .justify_center()
                             .bg(if selected {
-                                rgb(PRIMARY)
+                                rgb(self.palette.primary)
                             } else {
-                                rgb(SURFACE_HIGH)
+                                rgb(self.palette.surface_high)
                             })
                             .text_color(if selected {
-                                rgb(ON_PRIMARY)
+                                rgb(self.palette.on_primary)
                             } else {
-                                rgb(ON_SURFACE)
+                                rgb(self.palette.on_surface)
                             })
                             .child(device_icon),
                     )
@@ -1412,13 +1526,16 @@ impl HeadphoneApp {
                                     .truncate()
                                     .child(self.device_short_name(device)),
                             )
-                            .child(div().text_sm().text_color(rgb(ON_SURFACE_VARIANT)).child(
-                                if device.connected {
-                                    self.t("Connected", "已连接")
-                                } else {
-                                    self.t("Offline", "离线")
-                                },
-                            )),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(self.palette.on_surface_variant))
+                                    .child(if device.connected {
+                                        self.t("Connected", "已连接")
+                                    } else {
+                                        self.t("Offline", "离线")
+                                    }),
+                            ),
                     )
                     .child(
                         div()
@@ -1444,7 +1561,7 @@ impl HeadphoneApp {
             .flex()
             .flex_col()
             .p_4()
-            .bg(rgb(SURFACE))
+            .bg(rgb(self.palette.surface))
             .child(
                 div()
                     .flex()
@@ -1469,7 +1586,7 @@ impl HeadphoneApp {
                     .px_2()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(ON_SURFACE_VARIANT))
+                    .text_color(rgb(self.palette.on_surface_variant))
                     .child(self.t("YOUR DEVICES", "你的设备")),
             )
             .child(list)
@@ -1484,12 +1601,12 @@ impl HeadphoneApp {
                     .rounded_3xl()
                     .cursor_pointer()
                     .when(self.show_settings, |item| {
-                        item.bg(rgb(PRIMARY_CONTAINER))
-                            .text_color(rgb(ON_PRIMARY_CONTAINER))
+                        item.bg(rgb(self.palette.primary_container))
+                            .text_color(rgb(self.palette.on_primary_container))
                     })
                     .when(!self.show_settings, |item| {
-                        item.bg(rgb(SURFACE_CONTAINER))
-                            .hover(|item| item.bg(rgb(SURFACE_HIGH)))
+                        item.bg(rgb(self.palette.surface_container))
+                            .hover(|item| item.bg(rgb(self.palette.surface_high)))
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_settings = true;
@@ -1502,7 +1619,7 @@ impl HeadphoneApp {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .bg(rgb(SURFACE_HIGH))
+                            .bg(rgb(self.palette.surface_high))
                             .font_weight(FontWeight::BOLD)
                             .child("⚙"),
                     )
@@ -1517,14 +1634,14 @@ impl HeadphoneApp {
                     div()
                         .p_3()
                         .rounded_3xl()
-                        .bg(rgb(SECONDARY_CONTAINER))
-                        .text_color(rgb(ON_SECONDARY_CONTAINER))
+                        .bg(rgb(self.palette.secondary_container))
+                        .text_color(rgb(self.palette.on_secondary_container))
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(status_title))
                         .child(
                             div()
                                 .mt_1()
                                 .text_sm()
-                                .text_color(rgb(ON_SECONDARY_CONTAINER).opacity(0.72))
+                                .text_color(rgb(self.palette.on_secondary_container).opacity(0.72))
                                 .child(self.backend_status.clone()),
                         ),
                 ),
@@ -1543,7 +1660,7 @@ impl HeadphoneApp {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(PRIMARY))
+                            .text_color(rgb(self.palette.primary))
                             .child(self.t("NOW CONTROLLING", "正在控制")),
                     )
                     .child(
@@ -1564,7 +1681,11 @@ impl HeadphoneApp {
                         } else {
                             self.t("Searching", "正在查找")
                         },
-                        if device.connected { SUCCESS } else { OUTLINE },
+                        if device.connected {
+                            self.palette.success
+                        } else {
+                            self.palette.outline
+                        },
                     ))
                     .when(device.connected, |chips| {
                         chips.child(Self::chip(
@@ -1574,11 +1695,14 @@ impl HeadphoneApp {
                                     format!("电量 {}%", device.battery_percent)
                                 }
                             },
-                            PRIMARY,
+                            self.palette.primary,
                         ))
                     })
                     .when(device.connected && self.sony.charging, |chips| {
-                        chips.child(Self::chip(self.t("Charging", "充电中"), SUCCESS))
+                        chips.child(Self::chip(
+                            self.t("Charging", "充电中"),
+                            self.palette.success,
+                        ))
                     }),
             )
     }
@@ -1595,7 +1719,7 @@ impl HeadphoneApp {
             .p_1()
             .mb_2()
             .rounded_full()
-            .bg(rgb(SURFACE_CONTAINER));
+            .bg(rgb(self.palette.surface_container));
         for (page, label) in tabs {
             let selected = self.detail_page == page;
             row = row.child(
@@ -1610,11 +1734,12 @@ impl HeadphoneApp {
                     .text_center()
                     .font_weight(FontWeight::SEMIBOLD)
                     .when(selected, |tab| {
-                        tab.bg(rgb(PRIMARY)).text_color(rgb(ON_PRIMARY))
+                        tab.bg(rgb(self.palette.primary))
+                            .text_color(rgb(self.palette.on_primary))
                     })
                     .when(!selected, |tab| {
-                        tab.text_color(rgb(ON_SURFACE_VARIANT))
-                            .hover(|tab| tab.bg(rgb(SURFACE_HIGH)))
+                        tab.text_color(rgb(self.palette.on_surface_variant))
+                            .hover(|tab| tab.bg(rgb(self.palette.surface_high)))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.detail_page = page;
@@ -1629,8 +1754,8 @@ impl HeadphoneApp {
     fn hero(&self, device: &DeviceSnapshot) -> impl IntoElement {
         let (container, content, eyebrow, headline, description) = if !device.connected {
             (
-                SURFACE_HIGH,
-                ON_SURFACE,
+                self.palette.surface_high,
+                self.palette.on_surface,
                 self.t("GETTING READY", "准备连接"),
                 self.t("Looking for your headphones.", "正在查找你的耳机。"),
                 self.t(
@@ -1641,8 +1766,8 @@ impl HeadphoneApp {
         } else {
             match device.noise_mode {
                 NoiseMode::NoiseCancelling => (
-                    PRIMARY_CONTAINER,
-                    ON_PRIMARY_CONTAINER,
+                    self.palette.primary_container,
+                    self.palette.on_primary_container,
                     self.t("DEEP FOCUS", "沉浸专注"),
                     self.t("Quiet, shaped around you.", "为你隔绝喧嚣。"),
                     self.t(
@@ -1651,8 +1776,8 @@ impl HeadphoneApp {
                     ),
                 ),
                 NoiseMode::Transparency | NoiseMode::Ambient => (
-                    SECONDARY_CONTAINER,
-                    ON_SECONDARY_CONTAINER,
+                    self.palette.secondary_container,
+                    self.palette.on_secondary_container,
                     self.t("STAY AWARE", "感知环境"),
                     self.t("Let the world back in.", "让外界声音自然进入。"),
                     self.t(
@@ -1661,8 +1786,8 @@ impl HeadphoneApp {
                     ),
                 ),
                 NoiseMode::Adaptive => (
-                    TERTIARY_CONTAINER,
-                    ON_TERTIARY_CONTAINER,
+                    self.palette.tertiary_container,
+                    self.palette.on_tertiary_container,
                     self.t("ADAPTIVE SOUND", "自适应声音"),
                     self.t("The right balance, automatically.", "自动找到合适的平衡。"),
                     self.t(
@@ -1671,8 +1796,8 @@ impl HeadphoneApp {
                     ),
                 ),
                 NoiseMode::Off => (
-                    SURFACE_HIGH,
-                    ON_SURFACE,
+                    self.palette.surface_high,
+                    self.palette.on_surface,
                     self.t("DIRECT LISTENING", "自然聆听"),
                     self.t("Just the music.", "只留下音乐。"),
                     self.t(
@@ -1718,7 +1843,7 @@ impl HeadphoneApp {
                     .ml_8()
                     .p_5()
                     .rounded_3xl()
-                    .bg(rgb(CANVAS).opacity(0.22))
+                    .bg(rgb(self.palette.canvas).opacity(0.22))
                     .child(
                         div()
                             .text_sm()
@@ -1739,7 +1864,7 @@ impl HeadphoneApp {
                             .w_full()
                             .rounded_full()
                             .overflow_hidden()
-                            .bg(rgb(CANVAS).opacity(0.22))
+                            .bg(rgb(self.palette.canvas).opacity(0.22))
                             .child(
                                 div()
                                     .h_full()
@@ -1758,7 +1883,7 @@ impl HeadphoneApp {
             .mt_3()
             .p_1()
             .rounded_full()
-            .bg(rgb(CANVAS).opacity(0.46));
+            .bg(rgb(self.palette.canvas).opacity(0.46));
         for mode in device.capabilities.noise_modes.iter().copied() {
             let selected = mode == device.noise_mode;
             let device_kind = device.kind;
@@ -1773,10 +1898,16 @@ impl HeadphoneApp {
                     .text_sm()
                     .text_center()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .when(selected, |e| e.bg(rgb(PRIMARY)).text_color(rgb(ON_PRIMARY)))
+                    .when(selected, |e| {
+                        e.bg(rgb(self.palette.primary))
+                            .text_color(rgb(self.palette.on_primary))
+                    })
                     .when(!selected, |e| {
-                        e.text_color(rgb(ON_SURFACE_VARIANT))
-                            .hover(|e| e.bg(rgb(SURFACE_HIGH)).text_color(rgb(ON_SURFACE)))
+                        e.text_color(rgb(self.palette.on_surface_variant))
+                            .hover(|e| {
+                                e.bg(rgb(self.palette.surface_high))
+                                    .text_color(rgb(self.palette.on_surface))
+                            })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.devices[this.selected].set_noise_mode(mode);
@@ -1823,6 +1954,7 @@ impl HeadphoneApp {
     }
 
     fn round_action(
+        &self,
         id: &'static str,
         label: &'static str,
         delta: i8,
@@ -1832,14 +1964,14 @@ impl HeadphoneApp {
             .id(id)
             .size(px(36.))
             .rounded_full()
-            .bg(rgb(SECONDARY_CONTAINER))
-            .text_color(rgb(ON_SECONDARY_CONTAINER))
+            .bg(rgb(self.palette.secondary_container))
+            .text_color(rgb(self.palette.on_secondary_container))
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
             .text_lg()
-            .hover(|e| e.bg(rgb(PRIMARY_CONTAINER)))
+            .hover(|e| e.bg(rgb(self.palette.primary_container)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.devices[this.selected].adjust_ambient(delta);
                 if this.devices[this.selected].kind == DeviceKind::SonyWh1000Xm5 {
@@ -1864,30 +1996,30 @@ impl HeadphoneApp {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(Self::round_action("ambient-minus", "−", -1, cx))
+                .child(self.round_action("ambient-minus", "−", -1, cx))
                 .child(
                     div()
                         .flex_1()
                         .h(px(10.))
                         .rounded_full()
-                        .bg(rgb(SURFACE_HIGH))
+                        .bg(rgb(self.palette.surface_high))
                         .overflow_hidden()
                         .child(
                             div()
                                 .h_full()
                                 .w(gpui_kit::relative(fill))
                                 .rounded_full()
-                                .bg(rgb(PRIMARY)),
+                                .bg(rgb(self.palette.primary)),
                         ),
                 )
-                .child(Self::round_action("ambient-plus", "+", 1, cx))
+                .child(self.round_action("ambient-plus", "+", 1, cx))
                 .child(
                     div()
                         .px_3()
                         .py_2()
                         .rounded_full()
-                        .bg(rgb(PRIMARY_CONTAINER))
-                        .text_color(rgb(ON_PRIMARY_CONTAINER))
+                        .bg(rgb(self.palette.primary_container))
+                        .text_color(rgb(self.palette.on_primary_container))
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .child(format!("{} / 20", device.ambient_level)),
@@ -1911,9 +2043,9 @@ impl HeadphoneApp {
             .p_3()
             .rounded_2xl()
             .bg(if enabled {
-                rgb(SECONDARY_CONTAINER)
+                rgb(self.palette.secondary_container)
             } else {
-                rgb(SURFACE_CONTAINER)
+                rgb(self.palette.surface_container)
             })
             .child(
                 div()
@@ -1924,7 +2056,7 @@ impl HeadphoneApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .text_color(rgb(self.palette.on_surface_variant))
                             .child(description),
                     ),
             )
@@ -1937,7 +2069,11 @@ impl HeadphoneApp {
                     .rounded_full()
                     .cursor_pointer()
                     .flex()
-                    .bg(if enabled { rgb(PRIMARY) } else { rgb(OUTLINE) })
+                    .bg(if enabled {
+                        rgb(self.palette.primary)
+                    } else {
+                        rgb(self.palette.outline)
+                    })
                     .when(enabled, |e| e.justify_end())
                     .when(!enabled, |e| e.justify_start())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1945,14 +2081,15 @@ impl HeadphoneApp {
                         cx.notify();
                     }))
                     .child(div().size(px(22.)).rounded_full().bg(if enabled {
-                        rgb(ON_PRIMARY)
+                        rgb(self.palette.on_primary)
                     } else {
-                        rgb(SURFACE_HIGH)
+                        rgb(self.palette.surface_high)
                     })),
             )
     }
 
     fn choice_button(
+        &self,
         id: SharedString,
         label: SharedString,
         selected: bool,
@@ -1968,12 +2105,13 @@ impl HeadphoneApp {
             .text_sm()
             .font_weight(FontWeight::SEMIBOLD)
             .when(selected, |item| {
-                item.bg(rgb(PRIMARY)).text_color(rgb(ON_PRIMARY))
+                item.bg(rgb(self.palette.primary))
+                    .text_color(rgb(self.palette.on_primary))
             })
             .when(!selected, |item| {
-                item.bg(rgb(SURFACE_HIGH))
-                    .text_color(rgb(ON_SURFACE_VARIANT))
-                    .hover(|item| item.text_color(rgb(ON_SURFACE)))
+                item.bg(rgb(self.palette.surface_high))
+                    .text_color(rgb(self.palette.on_surface_variant))
+                    .hover(|item| item.text_color(rgb(self.palette.on_surface)))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 action(this);
@@ -1984,21 +2122,31 @@ impl HeadphoneApp {
 
     fn sony_over_ear_hero(&self, device: &DeviceSnapshot) -> impl IntoElement {
         let (wearing, wearing_color, wearing_icon) = match self.sony.wearing_status {
-            Some(WearingStatus::Normal) => (self.t("Worn", "已佩戴"), AIRPODS_WORN, IconName::Ear),
+            Some(WearingStatus::Normal) => (
+                self.t("Worn", "已佩戴"),
+                self.palette.airpods_worn,
+                IconName::Ear,
+            ),
             Some(WearingStatus::LeftRemoved | WearingStatus::RightRemoved) => (
                 self.t("Partially removed", "部分摘下"),
-                AIRPODS_CASE,
+                self.palette.airpods_case,
                 IconName::EarOff,
             ),
-            Some(WearingStatus::BothRemoved) => {
-                (self.t("Removed", "已摘下"), OUTLINE, IconName::EarOff)
-            }
+            Some(WearingStatus::BothRemoved) => (
+                self.t("Removed", "已摘下"),
+                self.palette.outline,
+                IconName::EarOff,
+            ),
             Some(WearingStatus::Illegal) => (
                 self.t("Status unavailable", "状态异常"),
-                OUTLINE,
+                self.palette.outline,
                 IconName::CircleOff,
             ),
-            None => (self.t("Reading…", "读取中…"), OUTLINE, IconName::Ear),
+            None => (
+                self.t("Reading…", "读取中…"),
+                self.palette.outline,
+                IconName::Ear,
+            ),
         };
         let battery = if self.sony.charging {
             format!(
@@ -2020,7 +2168,7 @@ impl HeadphoneApp {
             .h(px(250.))
             .rounded_3xl()
             .overflow_hidden()
-            .bg(rgb(SURFACE_CONTAINER))
+            .bg(rgb(self.palette.surface_container))
             .p_4()
             .flex()
             .child(
@@ -2042,14 +2190,14 @@ impl HeadphoneApp {
                     .h_full()
                     .pl_4()
                     .border_l_1()
-                    .border_color(rgb(OUTLINE).opacity(0.24))
+                    .border_color(rgb(self.palette.outline).opacity(0.24))
                     .flex()
                     .flex_col()
                     .justify_center()
                     .child(self.sony_status_row(
                         self.t("Battery", "整机电量"),
                         battery.into(),
-                        PRIMARY,
+                        self.palette.primary,
                         if self.sony.charging {
                             IconName::BatteryCharging
                         } else {
@@ -2067,14 +2215,14 @@ impl HeadphoneApp {
                     .child(self.sony_status_row(
                         self.t("Sound mode", "声音模式"),
                         self.noise_mode_label(device.noise_mode).into(),
-                        SONY_MODE,
+                        self.palette.sony_mode,
                         IconName::AudioLines,
                         None,
                     ))
                     .child(self.sony_status_row(
                         self.t("Codec", "编解码器"),
                         codec.into(),
-                        SONY_CODEC,
+                        self.palette.sony_codec,
                         IconName::Cpu,
                         None,
                     )),
@@ -2095,7 +2243,7 @@ impl HeadphoneApp {
             .gap_2()
             .py_1()
             .border_b_1()
-            .border_color(rgb(OUTLINE).opacity(0.14))
+            .border_color(rgb(self.palette.outline).opacity(0.14))
             .child(
                 div()
                     .size(px(34.))
@@ -2116,7 +2264,7 @@ impl HeadphoneApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .text_color(rgb(self.palette.on_surface_variant))
                             .child(label),
                     )
                     .child(
@@ -2135,7 +2283,7 @@ impl HeadphoneApp {
                                 .w_full()
                                 .rounded_full()
                                 .overflow_hidden()
-                                .bg(rgb(OUTLINE).opacity(0.18))
+                                .bg(rgb(self.palette.outline).opacity(0.18))
                                 .child(
                                     div()
                                         .h_full()
@@ -2179,11 +2327,11 @@ impl HeadphoneApp {
                 div()
                     .p_4()
                     .rounded_2xl()
-                    .bg(rgb(SURFACE_HIGH))
+                    .bg(rgb(self.palette.surface_high))
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .text_color(rgb(self.palette.on_surface_variant))
                             .child(label),
                     )
                     .child(
@@ -2215,7 +2363,7 @@ impl HeadphoneApp {
             .h(px(300.))
             .rounded_3xl()
             .overflow_hidden()
-            .bg(rgb(SURFACE_CONTAINER))
+            .bg(rgb(self.palette.surface_container))
             .p_4()
             .child(
                 div()
@@ -2228,21 +2376,24 @@ impl HeadphoneApp {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(PRIMARY))
+                                    .text_color(rgb(self.palette.primary))
                                     .child(self.t("LIVE AAP STATUS", "AAP 实时状态")),
                             )
                             .child(
                                 div()
                                     .mt_1()
                                     .text_sm()
-                                    .text_color(rgb(ON_SURFACE_VARIANT))
+                                    .text_color(rgb(self.palette.on_surface_variant))
                                     .child(self.t(
                                         "Battery and wearing state at a glance",
                                         "一眼查看电量与佩戴状态",
                                     )),
                             ),
                     )
-                    .child(Self::chip(self.t("Connected", "已连接"), AIRPODS_WORN)),
+                    .child(Self::chip(
+                        self.t("Connected", "已连接"),
+                        self.palette.airpods_worn,
+                    )),
             )
             .child(
                 div()
@@ -2277,12 +2428,12 @@ impl HeadphoneApp {
         state: Option<PodState>,
     ) -> impl IntoElement {
         let color = if charging {
-            AIRPODS_CHARGING
+            self.palette.airpods_charging
         } else {
             match state {
-                Some(PodState::InEar) => AIRPODS_WORN,
-                Some(PodState::InCase) => AIRPODS_CASE,
-                Some(PodState::OutOfEar | PodState::Unknown(_)) | None => OUTLINE,
+                Some(PodState::InEar) => self.palette.airpods_worn,
+                Some(PodState::InCase) => self.palette.airpods_case,
+                Some(PodState::OutOfEar | PodState::Unknown(_)) | None => self.palette.outline,
             }
         };
         let icon = if charging {
@@ -2319,7 +2470,7 @@ impl HeadphoneApp {
                     .rounded_full()
                     .border_2()
                     .border_color(rgb(color).opacity(0.78))
-                    .bg(rgb(CANVAS).opacity(0.26))
+                    .bg(rgb(self.palette.canvas).opacity(0.26))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2332,14 +2483,14 @@ impl HeadphoneApp {
                             .size(px(30.))
                             .rounded_full()
                             .border_2()
-                            .border_color(rgb(SURFACE_CONTAINER))
+                            .border_color(rgb(self.palette.surface_container))
                             .bg(rgb(color))
-                            .text_color(rgb(CANVAS))
+                            .text_color(rgb(self.palette.canvas))
                             .text_sm()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(Icon::new(icon).text_color(rgb(CANVAS))),
+                            .child(Icon::new(icon).text_color(rgb(self.palette.canvas))),
                     ),
             )
             .child(div().mt_2().font_weight(FontWeight::SEMIBOLD).child(label))
@@ -2363,9 +2514,9 @@ impl HeadphoneApp {
     fn airpods_case_node(&self) -> impl IntoElement {
         let level = self.airpods.battery.case;
         let color = if self.airpods.battery.case_charging {
-            AIRPODS_CHARGING
+            self.palette.airpods_charging
         } else {
-            AIRPODS_CASE
+            self.palette.airpods_case
         };
         div()
             .w(px(180.))
@@ -2420,7 +2571,7 @@ impl HeadphoneApp {
         ];
         let mut controls = div().flex().flex_wrap().gap_2().mt_3();
         for (microphone, label) in options {
-            controls = controls.child(Self::choice_button(
+            controls = controls.child(self.choice_button(
                 SharedString::from(format!("airpods-microphone-{microphone:?}")),
                 SharedString::from(label),
                 self.airpods.microphone == Some(microphone),
@@ -2446,7 +2597,7 @@ impl HeadphoneApp {
         let cycle = self.airpods.mode_cycle.unwrap_or_default();
         let mut buttons = div().flex().flex_wrap().gap_2();
         for mode in capabilities.listening_modes.iter().copied() {
-            buttons = buttons.child(Self::choice_button(
+            buttons = buttons.child(self.choice_button(
                 SharedString::from(format!("airpods-cycle-{mode:?}")),
                 SharedString::from(self.noise_mode_label(noise_mode_from_airpods(mode))),
                 cycle.contains(mode),
@@ -2476,7 +2627,7 @@ impl HeadphoneApp {
                         div()
                             .mt_2()
                             .text_xs()
-                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .text_color(rgb(self.palette.on_surface_variant))
                             .child(self.t(
                             "AirPods don't report the current selection; pick the modes to set it.",
                             "AirPods 不会回报当前选择，选好模式后即会写入。",
@@ -2509,7 +2660,7 @@ impl HeadphoneApp {
         let current = self.airpods.adaptive_noise_level.map(adaptive_noise_stop);
         let mut controls = div().flex().flex_wrap().gap_2().mt_3();
         for (level, label) in options {
-            controls = controls.child(Self::choice_button(
+            controls = controls.child(self.choice_button(
                 SharedString::from(format!("airpods-adaptive-{level}")),
                 SharedString::from(label),
                 current == Some(level),
@@ -2541,7 +2692,7 @@ impl HeadphoneApp {
     ) -> impl IntoElement {
         let mut buttons = div().flex().gap_1();
         for (timing, option_label) in AirPodsTiming::ALL.into_iter().zip(option_labels) {
-            buttons = buttons.child(Self::choice_button(
+            buttons = buttons.child(self.choice_button(
                 SharedString::from(format!("airpods-{id}-{timing:?}")),
                 SharedString::from(option_label),
                 current == Some(timing),
@@ -2552,10 +2703,10 @@ impl HeadphoneApp {
                 cx,
             ));
         }
-        Self::settings_row(label, buttons)
+        self.settings_row(label, buttons)
     }
 
-    fn settings_row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
+    fn settings_row(&self, label: &'static str, control: impl IntoElement) -> impl IntoElement {
         div()
             .flex()
             .items_center()
@@ -2563,7 +2714,7 @@ impl HeadphoneApp {
             .gap_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(OUTLINE).opacity(0.14))
+            .border_color(rgb(self.palette.outline).opacity(0.14))
             .child(
                 div()
                     .text_sm()
@@ -2635,51 +2786,56 @@ impl HeadphoneApp {
                 }
             };
             let volume = self.airpods.chime_volume;
-            rows = rows.child(Self::settings_row(
-                self.t("Tone volume", "提示音音量"),
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(Self::choice_button(
-                        "airpods-chime-down".into(),
-                        "−".into(),
-                        false,
-                        step(-10),
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .w(px(120.))
-                            .h(px(8.))
-                            .rounded_full()
-                            .overflow_hidden()
-                            .bg(rgb(SURFACE_HIGH))
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(gpui_kit::relative(f32::from(volume.unwrap_or(0)) / 100.0))
-                                    .rounded_full()
-                                    .bg(rgb(PRIMARY)),
-                            ),
-                    )
-                    .child(Self::choice_button(
-                        "airpods-chime-up".into(),
-                        "+".into(),
-                        false,
-                        step(10),
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .w(px(44.))
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .child(
-                                volume.map_or_else(|| "—".into(), |volume| format!("{volume}%")),
-                            ),
-                    ),
-            ));
+            rows = rows.child(
+                self.settings_row(
+                    self.t("Tone volume", "提示音音量"),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(self.choice_button(
+                            "airpods-chime-down".into(),
+                            "−".into(),
+                            false,
+                            step(-10),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(rgb(self.palette.surface_high))
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(gpui_kit::relative(
+                                            f32::from(volume.unwrap_or(0)) / 100.0,
+                                        ))
+                                        .rounded_full()
+                                        .bg(rgb(self.palette.primary)),
+                                ),
+                        )
+                        .child(self.choice_button(
+                            "airpods-chime-up".into(),
+                            "+".into(),
+                            false,
+                            step(10),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .w(px(44.))
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .child(
+                                    volume
+                                        .map_or_else(|| "—".into(), |volume| format!("{volume}%")),
+                                ),
+                        ),
+                ),
+            );
         }
         self.panel(
             self.t("Controls and tones", "按压与提示音"),
@@ -2739,12 +2895,12 @@ impl HeadphoneApp {
                 div()
                     .p_3()
                     .rounded_2xl()
-                    .bg(rgb(SURFACE_HIGH))
+                    .bg(rgb(self.palette.surface_high))
                     .overflow_hidden()
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .text_color(rgb(self.palette.on_surface_variant))
                             .child(label),
                     )
                     .child(
@@ -2766,7 +2922,7 @@ impl HeadphoneApp {
         )
     }
 
-    fn eq_action(index: usize, delta: i8, cx: &mut Context<Self>) -> impl IntoElement {
+    fn eq_action(&self, index: usize, delta: i8, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id(SharedString::from(format!("eq-{index}-{delta}")))
             .size(px(32.))
@@ -2775,8 +2931,8 @@ impl HeadphoneApp {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(rgb(SECONDARY_CONTAINER))
-            .text_color(rgb(ON_SECONDARY_CONTAINER))
+            .bg(rgb(self.palette.secondary_container))
+            .text_color(rgb(self.palette.on_secondary_container))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let Some(mut equalizer) = this.sony.equalizer else {
                     return;
@@ -2802,7 +2958,7 @@ impl HeadphoneApp {
         let mut presets = div().flex().flex_wrap().gap_2().mt_3();
         for preset in EqPreset::CHOICES {
             let selected = equalizer.preset == preset;
-            presets = presets.child(Self::choice_button(
+            presets = presets.child(self.choice_button(
                 SharedString::from(format!("eq-preset-{preset:?}")),
                 self.preset_label(preset).into(),
                 selected,
@@ -2833,11 +2989,11 @@ impl HeadphoneApp {
                 div()
                     .p_2()
                     .rounded_2xl()
-                    .bg(rgb(SURFACE_HIGH))
+                    .bg(rgb(self.palette.surface_high))
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .text_color(rgb(self.palette.on_surface_variant))
                             .child(label),
                     )
                     .child(
@@ -2846,13 +3002,13 @@ impl HeadphoneApp {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(Self::eq_action(index, -1, cx))
+                            .child(self.eq_action(index, -1, cx))
                             .child(
                                 div()
                                     .font_weight(FontWeight::BOLD)
                                     .child(format!("{:+}", equalizer.bands[index])),
                             )
-                            .child(Self::eq_action(index, 1, cx)),
+                            .child(self.eq_action(index, 1, cx)),
                     ),
             );
         }
@@ -2875,7 +3031,7 @@ impl HeadphoneApp {
                 AutoOff::Never => self.t("Never", "永不"),
                 AutoOff::Minutes(_) => self.t("After a delay", "延时后"),
             };
-            auto_off = auto_off.child(Self::choice_button(
+            auto_off = auto_off.child(self.choice_button(
                 SharedString::from(format!("auto-off-{choice:?}")),
                 label.into(),
                 self.sony.auto_off == Some(choice),
@@ -2897,7 +3053,7 @@ impl HeadphoneApp {
                 NoiseButton::NoiseCancellingOff => self.t("ANC · Off", "降噪 · 关闭"),
                 NoiseButton::AmbientOff => self.t("Ambient · Off", "环境声 · 关闭"),
             };
-            noise_button = noise_button.child(Self::choice_button(
+            noise_button = noise_button.child(self.choice_button(
                 SharedString::from(format!("noise-button-{choice:?}")),
                 label.into(),
                 self.sony.noise_button == Some(choice),
@@ -2916,7 +3072,7 @@ impl HeadphoneApp {
                 VoiceSensitivity::High => self.t("High", "高"),
                 VoiceSensitivity::Low => self.t("Low", "低"),
             };
-            sensitivity = sensitivity.child(Self::choice_button(
+            sensitivity = sensitivity.child(self.choice_button(
                 SharedString::from(format!("voice-sensitivity-{choice:?}")),
                 label.into(),
                 self.sony.voice_sensitivity == Some(choice),
@@ -2936,7 +3092,7 @@ impl HeadphoneApp {
                 SpeakToChatEnd::Long => self.t("Long", "长"),
                 SpeakToChatEnd::Never => self.t("Never", "永不"),
             };
-            end = end.child(Self::choice_button(
+            end = end.child(self.choice_button(
                 SharedString::from(format!("speak-end-{choice:?}")),
                 label.into(),
                 self.sony.speak_to_chat_end == Some(choice),
@@ -2955,7 +3111,7 @@ impl HeadphoneApp {
                     div()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(ON_SURFACE_VARIANT))
+                        .text_color(rgb(self.palette.on_surface_variant))
                         .child(label),
                 )
                 .child(choices)
@@ -2987,8 +3143,8 @@ impl HeadphoneApp {
                 div()
                     .p_3()
                     .rounded_2xl()
-                    .bg(rgb(SURFACE_HIGH))
-                    .text_color(rgb(ON_SURFACE_VARIANT))
+                    .bg(rgb(self.palette.surface_high))
+                    .text_color(rgb(self.palette.on_surface_variant))
                     .child(self.t(
                         "No multipoint devices reported yet.",
                         "耳机尚未回报多点连接设备。",
@@ -3004,7 +3160,7 @@ impl HeadphoneApp {
                     .justify_between()
                     .p_3()
                     .rounded_2xl()
-                    .bg(rgb(SURFACE_HIGH))
+                    .bg(rgb(self.palette.surface_high))
                     .child(
                         div()
                             .child(
@@ -3012,16 +3168,19 @@ impl HeadphoneApp {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(device.name.clone()),
                             )
-                            .child(div().text_sm().text_color(rgb(ON_SURFACE_VARIANT)).child(
-                                if device.playing {
-                                    self.t("Currently playing", "当前正在播放")
-                                } else {
-                                    self.t("Connected", "已连接")
-                                },
-                            )),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(self.palette.on_surface_variant))
+                                    .child(if device.playing {
+                                        self.t("Currently playing", "当前正在播放")
+                                    } else {
+                                        self.t("Connected", "已连接")
+                                    }),
+                            ),
                     )
                     .when(!device.playing, |row| {
-                        row.child(Self::choice_button(
+                        row.child(self.choice_button(
                             SharedString::from(format!("play-from-{id}")),
                             self.t("Play from here", "从此设备播放").into(),
                             false,
@@ -3056,8 +3215,8 @@ impl HeadphoneApp {
                 .py_2()
                 .rounded_full()
                 .cursor_pointer()
-                .bg(rgb(TERTIARY_CONTAINER))
-                .text_color(rgb(ON_TERTIARY_CONTAINER))
+                .bg(rgb(self.palette.tertiary_container))
+                .text_color(rgb(self.palette.on_tertiary_container))
                 .font_weight(FontWeight::SEMIBOLD)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.send_setting(Setting::PowerOff);
@@ -3072,18 +3231,44 @@ impl HeadphoneApp {
     }
 
     fn settings_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .mt_5()
+            .child(self.choice_button(
+                "theme-system".into(),
+                self.t("Follow device", "跟随设备").into(),
+                self.theme == ThemePreference::System,
+                |this| this.set_theme(ThemePreference::System),
+                cx,
+            ))
+            .child(self.choice_button(
+                "theme-light".into(),
+                self.t("Light", "亮色").into(),
+                self.theme == ThemePreference::Light,
+                |this| this.set_theme(ThemePreference::Light),
+                cx,
+            ))
+            .child(self.choice_button(
+                "theme-dark".into(),
+                self.t("Dark", "暗色").into(),
+                self.theme == ThemePreference::Dark,
+                |this| this.set_theme(ThemePreference::Dark),
+                cx,
+            ));
         let language = div()
             .flex()
             .gap_2()
             .mt_5()
-            .child(Self::choice_button(
+            .child(self.choice_button(
                 "language-en".into(),
                 "English".into(),
                 self.language == Language::English,
                 |this| this.set_language(Language::English),
                 cx,
             ))
-            .child(Self::choice_button(
+            .child(self.choice_button(
                 "language-zh-cn".into(),
                 "简体中文".into(),
                 self.language == Language::SimplifiedChinese,
@@ -3100,7 +3285,7 @@ impl HeadphoneApp {
                 div()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(PRIMARY))
+                    .text_color(rgb(self.palette.primary))
                     .child(self.t("PREFERENCES", "偏好设置")),
             )
             .child(
@@ -3113,13 +3298,21 @@ impl HeadphoneApp {
             .child(
                 div()
                     .mt_2()
-                    .text_color(rgb(ON_SURFACE_VARIANT))
+                    .text_color(rgb(self.palette.on_surface_variant))
                     .child(self.t(
                         "Personalize iHeadphone without changing your headphone settings.",
                         "个性化 iHeadphone，不会修改耳机本身的设置。",
                     )),
             )
             .child(div().mt_4().child(self.panel(
+                self.t("Appearance", "外观"),
+                self.t(
+                    "Choose a light or dark theme, or match this device",
+                    "选择亮色或暗色主题，也可以跟随当前设备",
+                ),
+                appearance,
+            )))
+            .child(div().mt_3().child(self.panel(
                 self.t("Language", "语言"),
                 self.t(
                     "Choose the language used throughout the application",
@@ -3139,7 +3332,7 @@ impl HeadphoneApp {
                             .mt_5()
                             .p_4()
                             .rounded_2xl()
-                            .bg(rgb(SURFACE_HIGH))
+                            .bg(rgb(self.palette.surface_high))
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -3149,7 +3342,7 @@ impl HeadphoneApp {
                                 div()
                                     .mt_1()
                                     .text_sm()
-                                    .text_color(rgb(ON_SURFACE_VARIANT))
+                                    .text_color(rgb(self.palette.on_surface_variant))
                                     .child(self.t(
                                         "Linux and macOS desktop preview",
                                         "Linux 与 macOS 桌面预览版",
@@ -3195,7 +3388,7 @@ impl HeadphoneApp {
                     .max_w(px(520.))
                     .p_6()
                     .rounded_3xl()
-                    .bg(rgb(SURFACE_CONTAINER))
+                    .bg(rgb(self.palette.surface_container))
                     .text_center()
                     .child(
                         div()
@@ -3205,8 +3398,11 @@ impl HeadphoneApp {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .bg(rgb(PRIMARY_CONTAINER))
-                            .child(Icon::new(IconName::AudioLines).text_color(rgb(PRIMARY))),
+                            .bg(rgb(self.palette.primary_container))
+                            .child(
+                                Icon::new(IconName::AudioLines)
+                                    .text_color(rgb(self.palette.primary)),
+                            ),
                     )
                     .child(
                         div()
@@ -3218,13 +3414,19 @@ impl HeadphoneApp {
                     .child(
                         div()
                             .mt_2()
-                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .text_color(rgb(self.palette.on_surface_variant))
                             .child(self.t(
                                 "Pair and connect your headphones in system Bluetooth settings. They will appear here when iHeadphone finds them.",
                                 "请先在系统蓝牙设置中配对并连接耳机；iHeadphone 发现设备后会显示在这里。",
                             )),
                     ),
             )
+    }
+
+    fn set_theme(&mut self, theme: ThemePreference) {
+        self.theme = theme;
+        self.palette = theme.palette(self.system_dark);
+        theme.save();
     }
 
     fn panel(
@@ -3237,13 +3439,13 @@ impl HeadphoneApp {
             .flex_1()
             .p_3()
             .rounded_2xl()
-            .bg(rgb(SURFACE_CONTAINER))
+            .bg(rgb(self.palette.surface_container))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
             .child(
                 div()
                     .mt_1()
                     .text_xs()
-                    .text_color(rgb(ON_SURFACE_VARIANT))
+                    .text_color(rgb(self.palette.on_surface_variant))
                     .child(subtitle),
             )
             .child(content)
@@ -3251,13 +3453,21 @@ impl HeadphoneApp {
 }
 
 impl Render for HeadphoneApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let system_dark = matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        );
+        if self.system_dark != system_dark {
+            self.system_dark = system_dark;
+            self.palette = self.theme.palette(system_dark);
+        }
         if self.show_settings {
             return div()
                 .size_full()
                 .flex()
-                .bg(rgb(CANVAS))
-                .text_color(rgb(ON_SURFACE))
+                .bg(rgb(self.palette.canvas))
+                .text_color(rgb(self.palette.on_surface))
                 .child(self.sidebar(cx))
                 .child(self.settings_view(cx))
                 .into_any_element();
@@ -3266,8 +3476,8 @@ impl Render for HeadphoneApp {
             return div()
                 .size_full()
                 .flex()
-                .bg(rgb(CANVAS))
-                .text_color(rgb(ON_SURFACE))
+                .bg(rgb(self.palette.canvas))
+                .text_color(rgb(self.palette.on_surface))
                 .child(self.sidebar(cx))
                 .child(self.empty_devices_view())
                 .into_any_element();
@@ -3441,8 +3651,8 @@ impl Render for HeadphoneApp {
         div()
             .size_full()
             .flex()
-            .bg(rgb(CANVAS))
-            .text_color(rgb(ON_SURFACE))
+            .bg(rgb(self.palette.canvas))
+            .text_color(rgb(self.palette.on_surface))
             .child(self.sidebar(cx))
             .when(!self.show_settings, |root| {
                 root.child(
@@ -3583,8 +3793,25 @@ fn open_or_activate_main_window(app: Entity<HeadphoneApp>, cx: &mut App) {
         return;
     }
 
-    gpui_kit::open_window(main_window_options(cx), cx, |_, _| app)
-        .expect("failed to open iHeadphone window");
+    gpui_kit::open_window(main_window_options(cx), cx, |window, _| {
+        let model = app.clone();
+        window
+            .observe_window_appearance(move |window, cx| {
+                let system_dark = matches!(
+                    window.appearance(),
+                    WindowAppearance::Dark | WindowAppearance::VibrantDark
+                );
+                model.update(cx, |app, cx| {
+                    app.system_dark = system_dark;
+                    app.palette = app.theme.palette(system_dark);
+                    cx.notify();
+                });
+                window.refresh();
+            })
+            .detach();
+        app
+    })
+    .expect("failed to open iHeadphone window");
     #[cfg(target_os = "macos")]
     cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
 }
@@ -3968,6 +4195,14 @@ mod tests {
         assert_eq!(app.t("Settings", "设置"), "设置");
         assert_eq!(app.noise_mode_label(NoiseMode::Ambient), "环境声");
         assert_eq!(app.preset_label(EqPreset::BassBoost), "低音增强");
+    }
+
+    #[test]
+    fn resolves_explicit_and_system_theme_preferences() {
+        assert_eq!(ThemePreference::Light.palette(true), Palette::LIGHT);
+        assert_eq!(ThemePreference::Dark.palette(false), Palette::DARK);
+        assert_eq!(ThemePreference::System.palette(false), Palette::LIGHT);
+        assert_eq!(ThemePreference::System.palette(true), Palette::DARK);
     }
 
     #[cfg(target_os = "macos")]
