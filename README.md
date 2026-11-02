@@ -48,11 +48,11 @@ depend on or execute podctl.
 - macOS: Sony WH-1000XM5 control plus native menu-bar controls for battery, volume, noise control,
   smart sound, equalizer presets, and multipoint audio sources. AirPods remain managed by macOS.
 
-On macOS, iHeadphone stays available as an accessory in the menu bar after its main window is
-closed. Click the headphones icon (and battery percentage while connected) to see the current
+On macOS, iHeadphone starts in the menu bar without opening the main window and stays available
+after that window is closed. Click the headphones icon (and battery percentage while connected) to see the current
 device status and change settings without opening the full controller. Click Equalizer or Multipoint
 to expand choices in place; choosing an option collapses the list. Clicking outside closes the popover.
-Open iHeadphone and Quit remain available at the bottom.
+Choose Open iHeadphone at the bottom to open the main window, or Quit to exit.
 
 ## Run with real AirPods hardware on Linux
 
@@ -142,7 +142,8 @@ interface switches immediately and remembers the selection across restarts. On L
 is stored under `$XDG_CONFIG_HOME/iheadphone` (or `~/.config/iheadphone`); on macOS it is stored in
 `~/Library/Application Support/iHeadphone`.
 
-For UI development, set `IHEADPHONE_OPEN_SETTINGS=1` to open directly on the settings page, or
+For UI development on macOS, set `IHEADPHONE_OPEN_MAIN_WINDOW=1` to show the main window on launch.
+Set `IHEADPHONE_OPEN_SETTINGS=1` to open directly on the settings page, or
 `IHEADPHONE_OPEN_DEVICE=sony|airpods` and `IHEADPHONE_OPEN_PAGE=overview|sound|device` to open a
 particular device page.
 `scripts/screenshots.sh` regenerates the Linux README screenshots from preview mode inside isolated
