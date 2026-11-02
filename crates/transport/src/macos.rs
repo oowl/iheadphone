@@ -22,14 +22,14 @@ use objc2_io_bluetooth::{
 use crate::{Device as DeviceKind, Event, Request};
 
 const RETRY_CONNECT: [Duration; 4] = [
-    Duration::from_secs(3),
-    Duration::from_secs(5),
-    Duration::from_secs(10),
-    Duration::from_secs(30),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
 ];
 const POLL: Duration = Duration::from_millis(20);
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
-const SDP_TIMEOUT: Duration = Duration::from_secs(5);
+const SDP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_INCOMING: usize = 8 * 1024;
 
 struct Connection {
@@ -53,9 +53,17 @@ pub fn run(
     };
     let mut searching = false;
     let mut failures = 0usize;
+    let mut detected_name = None;
 
     loop {
-        if let Some(mut connection) = connect(&delegate, &service, name_filter.as_deref()) {
+        let (connection, detected) = connect(
+            &delegate,
+            &service,
+            name_filter.as_deref(),
+            &events,
+            &mut detected_name,
+        );
+        if let Some(mut connection) = connection {
             searching = false;
             failures = 0;
             let _ = events.send_blocking(Event::Connected {
@@ -70,13 +78,16 @@ pub fn run(
             }
         } else {
             failures = failures.saturating_add(1);
-            if !searching {
+            if detected {
+                searching = false;
+            } else if !searching {
                 searching = true;
+                detected_name = None;
                 let _ = events.send_blocking(Event::Searching(DeviceKind::SonyWh1000Xm5));
             }
         }
 
-        let deadline = Instant::now() + RETRY_CONNECT[failures.min(RETRY_CONNECT.len() - 1)];
+        let deadline = Instant::now() + retry_delay(failures);
         while Instant::now() < deadline {
             match requests.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
@@ -87,6 +98,10 @@ pub fn run(
             return;
         }
     }
+}
+
+fn retry_delay(failures: usize) -> Duration {
+    RETRY_CONNECT[failures.saturating_sub(1).min(RETRY_CONNECT.len() - 1)]
 }
 
 fn serve(
@@ -166,11 +181,22 @@ fn connect(
     delegate: &Delegate,
     service: &Retained<IOBluetoothSDPUUID>,
     name_filter: Option<&str>,
-) -> Option<Connection> {
+    events: &async_channel::Sender<Event>,
+    detected_name: &mut Option<String>,
+) -> (Option<Connection>, bool) {
+    let mut detected = false;
     for device in connected_devices() {
         let name = unsafe { device.name() }.to_string();
         if name_filter.is_some_and(|filter| !name.contains(filter)) {
             continue;
+        }
+        detected = true;
+        if detected_name.as_deref() != Some(name.as_str()) {
+            *detected_name = Some(name.clone());
+            let _ = events.send_blocking(Event::Detected {
+                device: DeviceKind::SonyWh1000Xm5,
+                name: name.clone(),
+            });
         }
 
         let mut record = unsafe { device.getServiceRecordForUUID(Some(service)) };
@@ -203,11 +229,14 @@ fn connect(
         };
         match channel {
             Some(channel) if status == 0 => {
-                return Some(Connection {
-                    name,
-                    channel,
-                    driver: SonyXm5Driver::default(),
-                });
+                return (
+                    Some(Connection {
+                        name,
+                        channel,
+                        driver: SonyXm5Driver::default(),
+                    }),
+                    true,
+                );
             }
             Some(channel) => unsafe {
                 channel.closeChannel();
@@ -215,7 +244,7 @@ fn connect(
             None => {}
         }
     }
-    None
+    (None, detected)
 }
 
 fn query_service(
@@ -330,5 +359,13 @@ mod tests {
         let bytes = uuid_bytes(SERVICE_UUID).unwrap();
         assert_eq!(bytes[..4], [0x95, 0x6c, 0x7b, 0x26]);
         assert!(uuid_bytes("not-a-uuid").is_none());
+    }
+
+    #[test]
+    fn retries_connected_headsets_quickly() {
+        assert_eq!(retry_delay(1), Duration::from_millis(250));
+        assert_eq!(retry_delay(2), Duration::from_millis(500));
+        assert_eq!(retry_delay(3), Duration::from_secs(1));
+        assert_eq!(retry_delay(100), Duration::from_secs(2));
     }
 }

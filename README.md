@@ -2,6 +2,21 @@
 
 A native Linux and macOS desktop controller for AirPods and Sony headphones.
 
+Control Sony headphones directly from the macOS menu bar, including battery, volume, noise control,
+smart-sound switches, equalizer presets, and multipoint audio sources. Equalizer and device choices
+expand inline below their row.
+
+<table>
+  <tr>
+    <th>macOS menu-bar controls</th>
+    <th>Inline equalizer presets</th>
+  </tr>
+  <tr>
+    <td valign="top"><img src="docs/screenshots/macos-menu-bar.png" width="300" alt="Native macOS menu-bar widget showing battery percentage, volume, noise control, smart-sound switches, multipoint and equalizer"></td>
+    <td valign="top"><img src="docs/screenshots/macos-menu-bar-equalizer.png" width="300" alt="Equalizer presets expanded beneath the equalizer row in the same macOS popover, with Bright selected"></td>
+  </tr>
+</table>
+
 ![AirPods overview: battery and wearing state for each AirPod and the case, with noise control](docs/screenshots/airpods-overview.png)
 
 <table>
@@ -30,7 +45,14 @@ depend on or execute podctl.
 ## Current scope
 
 - Linux: AirPods and Sony WH-1000XM5 control.
-- macOS: Sony WH-1000XM5 control. AirPods remain managed by macOS.
+- macOS: Sony WH-1000XM5 control plus native menu-bar controls for battery, volume, noise control,
+  smart sound, equalizer presets, and multipoint audio sources. AirPods remain managed by macOS.
+
+On macOS, iHeadphone stays available as an accessory in the menu bar after its main window is
+closed. Click the headphones icon (and battery percentage while connected) to see the current
+device status and change settings without opening the full controller. Click Equalizer or Multipoint
+to expand choices in place; choosing an option collapses the list. Clicking outside closes the popover.
+Open iHeadphone and Quit remain available at the bottom.
 
 ## Run with real AirPods hardware on Linux
 
@@ -123,8 +145,17 @@ is stored under `$XDG_CONFIG_HOME/iheadphone` (or `~/.config/iheadphone`); on ma
 For UI development, set `IHEADPHONE_OPEN_SETTINGS=1` to open directly on the settings page, or
 `IHEADPHONE_OPEN_DEVICE=sony|airpods` and `IHEADPHONE_OPEN_PAGE=overview|sound|device` to open a
 particular device page.
-`scripts/screenshots.sh` regenerates the README screenshots from preview mode inside isolated virtual
-KWin sessions, so nothing else on your desktop is captured.
+`scripts/screenshots.sh` regenerates the Linux README screenshots from preview mode inside isolated
+virtual KWin sessions, so nothing else on your desktop is captured.
+
+To preview the actual macOS popover in an isolated app-owned window for screenshots:
+
+```sh
+IHEADPHONE_DEMO=1 IHEADPHONE_OPEN_POPOVER=1 IHEADPHONE_MENU_PREVIEW_WINDOW=1 cargo run -p iheadphone-desktop
+```
+
+Capture the popover itself, then expand Equalizer to capture its inline choices. The screenshot
+preview uses the same controls as the status item; it does not connect to headphones.
 
 ## Verify
 

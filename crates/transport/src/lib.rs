@@ -21,11 +21,23 @@ pub enum Device {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Searching(Device),
-    Connected { device: Device, name: String },
+    /// The operating system already has the headset connected, while the
+    /// vendor control channel may still be opening in the background.
+    Detected {
+        device: Device,
+        name: String,
+    },
+    Connected {
+        device: Device,
+        name: String,
+    },
     SonyUpdate(SonyUpdate),
     AirPodsUpdate(AirPodsUpdate),
     Disconnected(Device),
-    Unsupported { device: Device, reason: String },
+    Unsupported {
+        device: Device,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
