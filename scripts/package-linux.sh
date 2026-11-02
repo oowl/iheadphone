@@ -172,7 +172,7 @@ depend = wayland
 EOF
 (
     cd "$arch_root"
-    bsdtar -czf .MTREE --format=mtree \
+    bsdtar --uid 0 --gid 0 --numeric-owner -czf .MTREE --format=mtree \
         --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
         .PKGINFO usr
 )

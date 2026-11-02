@@ -171,6 +171,8 @@ jobs:
           dpkg-deb --info dist/*.deb
           rpm --query --package --info dist/*.rpm
           bsdtar -xOf dist/*.pkg.tar.zst .PKGINFO
+          bsdtar -xOf dist/*.pkg.tar.zst .MTREE | gzip --decompress > arch-mtree.txt
+          ! grep --extended-regexp --quiet '(^| )(uid|gid)=[1-9][0-9]*($| )' arch-mtree.txt
           file dist/*.AppImage
           chmod +x dist/*.AppImage
           dist/*.AppImage --appimage-extract >/dev/null
