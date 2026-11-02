@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-#[cfg(all(not(test), any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(target_os = "linux", all(not(test), target_os = "macos")))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock, mpsc};
 
