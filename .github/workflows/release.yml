@@ -69,6 +69,125 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
+  build-linux:
+    name: Build and package Linux (x86_64)
+    needs: prepare-release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+      LINUXDEPLOY_VERSION: 1-alpha-20251107-1
+      LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            appstream \
+            binutils \
+            build-essential \
+            desktop-file-utils \
+            dpkg-dev \
+            file \
+            libarchive-tools \
+            libdbus-1-dev \
+            libfontconfig1-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            patchelf \
+            pkg-config \
+            rpm \
+            zstd
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: release-cargo-linux-x86_64-ubuntu-22.04-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Download verified linuxdeploy
+        shell: bash
+        run: |
+          mkdir -p tools
+          curl --fail --location --retry 4 --retry-all-errors \
+            --output tools/linuxdeploy-x86_64.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_VERSION/linuxdeploy-x86_64.AppImage"
+          echo "$LINUXDEPLOY_SHA256  tools/linuxdeploy-x86_64.AppImage" | sha256sum --check --strict
+          chmod +x tools/linuxdeploy-x86_64.AppImage
+
+      - name: Build Ubuntu 22.04 release executable
+        shell: bash
+        run: |
+          cargo build --release --locked -p iheadphone-desktop
+          strip target/release/iheadphone
+          file target/release/iheadphone
+          ldd target/release/iheadphone
+
+      - name: Verify glibc compatibility baseline
+        shell: bash
+        run: |
+          max_glibc=$(readelf --version-info target/release/iheadphone \
+            | grep --only-matching --extended-regexp 'GLIBC_[0-9.]+' \
+            | cut --delimiter=_ --fields=2 \
+            | sort --version-sort \
+            | tail --lines=1)
+          echo "Maximum required glibc version: $max_glibc"
+          newest=$(printf '%s\n' 2.35 "$max_glibc" | sort --version-sort | tail --lines=1)
+          test "$newest" = 2.35
+
+      - name: Validate desktop metadata
+        run: |
+          desktop-file-validate packaging/linux/io.github.iheadphone.iheadphone.desktop
+          appstreamcli validate --no-net packaging/linux/io.github.iheadphone.iheadphone.metainfo.xml
+
+      - name: Build deb, rpm, Arch and AppImage packages
+        shell: bash
+        run: |
+          version=${RELEASE_TAG#v}
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH=$(git show --no-patch --format=%ct "${{ needs.prepare-release.outputs.sha }}")
+          LINUXDEPLOY="$PWD/tools/linuxdeploy-x86_64.AppImage" \
+            scripts/package-linux.sh target/release/iheadphone "$version" dist
+
+      - name: Inspect Linux packages
+        shell: bash
+        run: |
+          dpkg-deb --info dist/*.deb
+          rpm --query --package --info dist/*.rpm
+          bsdtar -xOf dist/*.pkg.tar.zst .PKGINFO
+          file dist/*.AppImage
+          chmod +x dist/*.AppImage
+          dist/*.AppImage --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/iheadphone
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: iheadphone-linux-x86_64
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 1
+
   build-macos:
     name: Build macOS (${{ matrix.arch }})
     needs: prepare-release
@@ -176,22 +295,58 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
+          name: iheadphone-macos-universal
           path: ${{ steps.package.outputs.dmg }}
           if-no-files-found: error
+          retention-days: 1
 
-      - name: Create release or upload DMG
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DMG: ${{ steps.package.outputs.dmg }}
-          VERSION: ${{ steps.package.outputs.version }}
+  publish-release:
+    name: Publish release assets
+    needs: [prepare-release, build-linux, package-macos]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download Linux packages
+        uses: actions/download-artifact@v8
+        with:
+          name: iheadphone-linux-x86_64
+          path: dist
+
+      - name: Download macOS package
+        uses: actions/download-artifact@v8
+        with:
+          name: iheadphone-macos-universal
+          path: dist
+
+      - name: Verify assets and create checksums
         shell: bash
         run: |
+          shopt -s nullglob
+          assets=(dist/*.dmg dist/*.deb dist/*.rpm dist/*.pkg.tar.zst dist/*.AppImage)
+          test "${#assets[@]}" -eq 5
+          (
+            cd dist
+            sha256sum -- *.dmg *.deb *.rpm *.pkg.tar.zst *.AppImage > SHA256SUMS.txt
+          )
+          ls -lh dist
+          (cd dist && sha256sum --check SHA256SUMS.txt)
+
+      - name: Create release or upload all packages
+        shell: bash
+        run: |
+          version=${RELEASE_TAG#v}
+          shopt -s nullglob
+          assets=(dist/*.dmg dist/*.deb dist/*.rpm dist/*.pkg.tar.zst dist/*.AppImage dist/SHA256SUMS.txt)
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$RELEASE_TAG" "$DMG" \
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
               --verify-tag \
               --generate-notes \
-              --title "iHeadphone $VERSION" \
+              --title "iHeadphone $version" \
               --repo "$GITHUB_REPOSITORY"
           fi

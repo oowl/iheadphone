@@ -138,6 +138,29 @@ Release images use an ad-hoc signature until a Developer ID certificate is confi
 therefore ask the user to confirm the first launch. Set `IHEADPHONE_CODESIGN_IDENTITY` when running
 the packaging script with an installed Developer ID certificate.
 
+## Linux release packages
+
+Every tagged release builds one x86_64 Linux executable on Ubuntu 22.04, verifies that it requires
+no newer than glibc 2.35, and packages that same executable as:
+
+- Debian/Ubuntu `.deb`
+- Fedora/RHEL-family `.rpm`
+- Arch Linux `.pkg.tar.zst`
+- Portable AppImage
+
+The workflow uploads all four packages, the universal macOS DMG, and `SHA256SUMS.txt` to the same
+GitHub Release. Building on Ubuntu 22.04 keeps the AppImage and native packages compatible with a
+wider range of distributions than a binary built on Ubuntu 24.04.
+
+To build the four Linux packages locally, install `dpkg-deb`, `rpmbuild`, `bsdtar`, and `zstd`,
+download a verified linuxdeploy AppImage, then run:
+
+```sh
+cargo build --release --locked -p iheadphone-desktop
+LINUXDEPLOY=/path/to/linuxdeploy-x86_64.AppImage \
+  scripts/package-linux.sh target/release/iheadphone 0.1.0 dist
+```
+
 ## Appearance and language
 
 Open **Settings** from the bottom of the sidebar and choose **English** or **简体中文**. The whole
