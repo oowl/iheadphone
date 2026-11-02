@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(not(test), any(target_os = "linux", target_os = "macos")))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock, mpsc};
 
@@ -163,7 +163,7 @@ fn airpods_notification_icon() -> Option<Vec<u8>> {
 }
 
 #[cfg(all(not(test), any(target_os = "linux", target_os = "macos")))]
-fn send_desktop_notification(device: BluetoothDevice, title: &str, body: &str) {
+fn send_desktop_notification(_device: BluetoothDevice, title: &str, body: &str) {
     let title = title.to_owned();
     let body = body.to_owned();
     let _ = std::thread::Builder::new()
@@ -173,7 +173,7 @@ fn send_desktop_notification(device: BluetoothDevice, title: &str, body: &str) {
             let result = {
                 let mut command = Command::new("notify-send");
                 command.arg("--app-name=iHeadphone");
-                if let Some(icon) = notification_icon_path(device) {
+                if let Some(icon) = notification_icon_path(_device) {
                     command.args(["--icon"]).arg(icon);
                 }
                 command
@@ -461,9 +461,9 @@ impl Language {
     fn settings_path() -> Option<PathBuf> {
         #[cfg(target_os = "macos")]
         {
-            return std::env::var_os("HOME")
+            std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .map(|home| home.join("Library/Application Support/iHeadphone/settings"));
+                .map(|home| home.join("Library/Application Support/iHeadphone/settings"))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -664,17 +664,7 @@ impl HeadphoneApp {
     fn new(requests: Option<mpsc::Sender<BluetoothRequest>>) -> Self {
         let hardware = requests.is_some();
         let language = Language::load();
-        let mut devices = if hardware {
-            let mut sony = sony_wh1000xm5(false);
-            sony.battery_percent = 0;
-            sony.noise_mode = NoiseMode::Off;
-            let mut devices = vec![sony];
-            #[cfg(target_os = "linux")]
-            devices.push(airpods(false));
-            devices
-        } else {
-            mock_devices()
-        };
+        let mut devices = if hardware { Vec::new() } else { mock_devices() };
         let airpods_details = if hardware {
             AirPodsDetails {
                 ear_detection: true,
@@ -711,9 +701,9 @@ impl HeadphoneApp {
             selected,
             requests,
             backend_status: if hardware && language == Language::SimplifiedChinese {
-                "正在查找 WH-1000XM5…".into()
+                "正在查找耳机…".into()
             } else if hardware {
-                "Searching for WH-1000XM5…".into()
+                "Searching for headphones…".into()
             } else if language == Language::SimplifiedChinese {
                 "控制功能正在预览模式下运行。".into()
             } else {
@@ -864,8 +854,21 @@ impl HeadphoneApp {
                 }
             }
             BluetoothEvent::Connected { device: kind, name } => {
-                let Some(index) = self.device_index(kind) else {
-                    return;
+                let index = if let Some(index) = self.device_index(kind) {
+                    index
+                } else {
+                    let was_empty = self.devices.is_empty();
+                    let mut device = match kind {
+                        BluetoothDevice::SonyWh1000Xm5 => sony_wh1000xm5(false),
+                        BluetoothDevice::AirPods => airpods(false),
+                    };
+                    device.battery_percent = 0;
+                    self.devices.push(device);
+                    let index = self.devices.len() - 1;
+                    if was_empty {
+                        self.selected = index;
+                    }
+                    index
                 };
                 let newly_connected = !self.devices[index].connected;
                 self.devices[index].connected = true;
@@ -1206,7 +1209,7 @@ impl HeadphoneApp {
 
         let status_title = if self.requests.is_none() {
             self.t("Preview mode", "预览模式")
-        } else if self.devices[0].connected {
+        } else if self.devices.iter().any(|device| device.connected) {
             self.t("Hardware connected", "硬件已连接")
         } else {
             self.t("Finding your headphones", "正在查找耳机")
@@ -2559,7 +2562,9 @@ impl HeadphoneApp {
                     equalizer.bands[index].saturating_add(delta).clamp(-10, 10);
                 equalizer.preset = EqPreset::Manual;
                 this.sony.equalizer = Some(equalizer);
-                this.devices[0].equalizer_enabled = true;
+                if let Some(index) = this.device_index(BluetoothDevice::SonyWh1000Xm5) {
+                    this.devices[index].equalizer_enabled = true;
+                }
                 this.send_setting(Setting::EqualizerBands(equalizer.bands));
                 cx.notify();
             }))
@@ -2582,7 +2587,9 @@ impl HeadphoneApp {
                     if let Some(equalizer) = &mut this.sony.equalizer {
                         equalizer.preset = preset;
                     }
-                    this.devices[0].equalizer_enabled = preset != EqPreset::Off;
+                    if let Some(index) = this.device_index(BluetoothDevice::SonyWh1000Xm5) {
+                        this.devices[index].equalizer_enabled = preset != EqPreset::Off;
+                    }
                     this.send_setting(Setting::EqualizerPreset(preset));
                 },
                 cx,
@@ -2939,16 +2946,60 @@ impl HeadphoneApp {
                 "控制功能正在预览模式下运行。",
             )
             .into()
-        } else if self.devices[0].connected {
+        } else if self.devices.iter().any(|device| device.connected) {
             self.t(
-                "WH-1000XM5 hardware controls are live.",
-                "WH-1000XM5 硬件控制已启用。",
+                "Headphone hardware controls are live.",
+                "耳机硬件控制已启用。",
             )
             .into()
         } else {
-            self.t("Searching for WH-1000XM5…", "正在查找 WH-1000XM5…")
-                .into()
+            self.t("Searching for headphones…", "正在查找耳机…").into()
         };
+    }
+
+    fn empty_devices_view(&self) -> impl IntoElement {
+        div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .child(
+                div()
+                    .max_w(px(520.))
+                    .p_6()
+                    .rounded_3xl()
+                    .bg(rgb(SURFACE_CONTAINER))
+                    .text_center()
+                    .child(
+                        div()
+                            .mx_auto()
+                            .size(px(56.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(PRIMARY_CONTAINER))
+                            .child(Icon::new(IconName::AudioLines).text_color(rgb(PRIMARY))),
+                    )
+                    .child(
+                        div()
+                            .mt_4()
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
+                            .child(self.t("Looking for headphones", "正在查找耳机")),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_color(rgb(ON_SURFACE_VARIANT))
+                            .child(self.t(
+                                "Pair and connect your headphones in system Bluetooth settings. They will appear here when iHeadphone finds them.",
+                                "请先在系统蓝牙设置中配对并连接耳机；iHeadphone 发现设备后会显示在这里。",
+                            )),
+                    ),
+            )
     }
 
     fn panel(
@@ -2976,6 +3027,26 @@ impl HeadphoneApp {
 
 impl Render for HeadphoneApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.show_settings {
+            return div()
+                .size_full()
+                .flex()
+                .bg(rgb(CANVAS))
+                .text_color(rgb(ON_SURFACE))
+                .child(self.sidebar(cx))
+                .child(self.settings_view(cx))
+                .into_any_element();
+        }
+        if self.devices.is_empty() {
+            return div()
+                .size_full()
+                .flex()
+                .bg(rgb(CANVAS))
+                .text_color(rgb(ON_SURFACE))
+                .child(self.sidebar(cx))
+                .child(self.empty_devices_view())
+                .into_any_element();
+        }
         let device = self.selected_device().clone();
         let selected = self.selected;
         let page = self.detail_page;
@@ -3148,9 +3219,6 @@ impl Render for HeadphoneApp {
             .bg(rgb(CANVAS))
             .text_color(rgb(ON_SURFACE))
             .child(self.sidebar(cx))
-            .when(self.show_settings, |root| {
-                root.child(self.settings_view(cx))
-            })
             .when(!self.show_settings, |root| {
                 root.child(
                     div()
@@ -3269,6 +3337,7 @@ impl Render for HeadphoneApp {
                         .when(show_features, |content| content.child(features)),
                 )
             })
+            .into_any_element()
     }
 }
 
@@ -3286,11 +3355,13 @@ fn main() {
                 (Some(link.requests), Some(link.events))
             };
             let app: Entity<HeadphoneApp> = cx.new(|_| {
-                let mut app = HeadphoneApp::new(requests);
+                let app = HeadphoneApp::new(requests);
                 #[cfg(target_os = "linux")]
-                {
+                let app = {
+                    let mut app = app;
                     app._media_bridge = Some(MediaBridge::start());
-                }
+                    app
+                };
                 app
             });
 
@@ -3354,6 +3425,24 @@ mod tests {
         assert_eq!(sony.noise_mode, NoiseMode::Ambient);
         assert_eq!(sony.ambient_level, 14);
         assert!(!sony.dsee_enabled);
+    }
+
+    #[test]
+    fn hardware_devices_only_appear_after_connecting() {
+        let (requests, _) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+
+        assert!(app.devices.is_empty());
+        app.apply_bluetooth_event(BluetoothEvent::Searching(BluetoothDevice::SonyWh1000Xm5));
+        assert!(app.devices.is_empty());
+
+        app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::SonyWh1000Xm5,
+            name: "WH-1000XM5".into(),
+        });
+        assert_eq!(app.devices.len(), 1);
+        assert_eq!(app.devices[0].kind, DeviceKind::SonyWh1000Xm5);
+        assert!(app.devices[0].connected);
     }
 
     #[test]

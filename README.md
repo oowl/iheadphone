@@ -95,6 +95,24 @@ cargo run -p iheadphone-transport --example xm5_smoke
 IHEADPHONE_DEMO=1 cargo run -p iheadphone-desktop
 ```
 
+## macOS application image
+
+Create a local application bundle and DMG from a release executable:
+
+```sh
+cargo build --release --locked -p iheadphone-desktop
+scripts/package-macos.sh target/release/iheadphone 0.1.0
+```
+
+The local command packages the architecture of the executable it receives and writes an image such
+as `dist/iHeadphone-0.1.0-arm64.dmg`. The release workflow builds both Apple Silicon and Intel
+executables, combines them into `iHeadphone-0.1.0-universal.dmg`, and attaches it to the GitHub
+Release when a tag such as `v0.1.0` is pushed. It can also be rerun manually for an existing tag.
+
+Release images use an ad-hoc signature until a Developer ID certificate is configured. macOS may
+therefore ask the user to confirm the first launch. Set `IHEADPHONE_CODESIGN_IDENTITY` when running
+the packaging script with an installed Developer ID certificate.
+
 ## Language
 
 Open **Settings** from the bottom of the sidebar and choose **English** or **简体中文**. The whole

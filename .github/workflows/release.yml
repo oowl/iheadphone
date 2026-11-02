@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal
+          rustup target add "${{ matrix.target }}"
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: release-cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Build release executable
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p iheadphone-desktop
+
+      - name: Prepare executable
+        run: |
+          mkdir -p artifact
+          cp "target/${{ matrix.target }}/release/iheadphone" "artifact/iheadphone-${{ matrix.arch }}"
+          strip -x "artifact/iheadphone-${{ matrix.arch }}"
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: iheadphone-${{ matrix.arch }}
+          path: artifact/iheadphone-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  package-macos:
+    name: Package universal macOS DMG
+    needs: build-macos
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Download arm64 executable
+        uses: actions/download-artifact@v8
+        with:
+          name: iheadphone-arm64
+          path: binaries/arm64
+
+      - name: Download x86_64 executable
+        uses: actions/download-artifact@v8
+        with:
+          name: iheadphone-x86_64
+          path: binaries/x86_64
+
+      - name: Build universal application and DMG
+        id: package
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Release tag must look like v0.1.0: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          chmod +x binaries/arm64/iheadphone-arm64 binaries/x86_64/iheadphone-x86_64
+          mkdir -p dist
+          lipo -create \
+            binaries/arm64/iheadphone-arm64 \
+            binaries/x86_64/iheadphone-x86_64 \
+            -output dist/iheadphone-universal
+          lipo -info dist/iheadphone-universal
+          IHEADPHONE_BUILD_NUMBER="$GITHUB_RUN_NUMBER" \
+            scripts/package-macos.sh dist/iheadphone-universal "$version" dist
+          dmg="dist/iHeadphone-$version-universal.dmg"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dmg=$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.package.outputs.dmg }}
+          if-no-files-found: error
+
+      - name: Create release or upload DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DMG: ${{ steps.package.outputs.dmg }}
+          VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "$DMG" \
+              --verify-tag \
+              --generate-notes \
+              --title "iHeadphone $VERSION" \
+              --repo "$GITHUB_REPOSITORY"
+          fi
