@@ -129,7 +129,10 @@ scripts/package-macos.sh target/release/iheadphone 0.1.0
 The local command packages the architecture of the executable it receives and writes an image such
 as `dist/iHeadphone-0.1.0-arm64.dmg`. The release workflow builds both Apple Silicon and Intel
 executables, combines them into `iHeadphone-0.1.0-universal.dmg`, and attaches it to the GitHub
-Release when a tag such as `v0.1.0` is pushed. It can also be rerun manually for an existing tag.
+Release when a tag such as `v0.1.0` is pushed. It can also be run manually with an optional tag.
+Leave the tag empty to use `v` plus the version in `[workspace.package]` in `Cargo.toml`.
+Missing tags are created at the selected ref's commit; existing tags are reused and their commit
+is built. To release a new version, update the Cargo version or enter a new tag explicitly.
 
 Release images use an ad-hoc signature until a Developer ID certificate is configured. macOS may
 therefore ask the user to confirm the first launch. Set `IHEADPHONE_CODESIGN_IDENTITY` when running

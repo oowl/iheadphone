@@ -7,15 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag, for example v0.1.0
-        required: true
+        description: Release tag (defaults to v + Cargo workspace version; created if missing)
+        required: false
         type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: release-${{ github.workflow }}
   cancel-in-progress: false
 
 env:
@@ -23,8 +23,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare-release:
+    name: Resolve or create release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve or create tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" && -z "$INPUT_TAG" ]]; then
+            tag="$GITHUB_REF_NAME"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            tag="$INPUT_TAG"
+          else
+            version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+            tag="v$version"
+          fi
+
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Release tag must look like v0.1.0: $tag" >&2
+            exit 1
+          fi
+          git check-ref-format "refs/tags/$tag"
+
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            sha=$(git rev-parse "refs/tags/$tag^{commit}")
+          else
+            sha=$(git rev-parse HEAD)
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$tag" -f "sha=$sha"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
   build-macos:
     name: Build macOS (${{ matrix.arch }})
+    needs: prepare-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
@@ -42,7 +89,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.sha }}
           persist-credentials: false
 
       - name: Install Rust toolchain
@@ -79,17 +126,17 @@ jobs:
 
   package-macos:
     name: Package universal macOS DMG
-    needs: build-macos
+    needs: [prepare-release, build-macos]
     runs-on: macos-15
     timeout-minutes: 15
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.sha }}
           persist-credentials: false
 
       - name: Download arm64 executable
