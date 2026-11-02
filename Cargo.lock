@@ -3150,12 +3150,15 @@ dependencies = [
 name = "iheadphone-desktop"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "block",
  "gpui-kit",
  "iheadphone-airpods-protocol",
  "iheadphone-domain",
  "iheadphone-sony-protocol",
  "iheadphone-transport",
  "image",
+ "objc",
 ]
 
 [[package]]

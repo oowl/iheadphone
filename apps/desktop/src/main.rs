@@ -29,6 +29,14 @@ use iheadphone_transport::{
     Device as BluetoothDevice, Event as BluetoothEvent, Request as BluetoothRequest,
 };
 
+#[cfg(target_os = "macos")]
+mod macos_menu_bar;
+#[cfg(target_os = "macos")]
+use macos_menu_bar::{
+    MacMenuBar, MenuBarAction, MenuBarDevice, MenuBarLanguage, MenuBarSnapshot, SmartFeature,
+    set_output_volume,
+};
+
 // Material 3 Expressive dark color roles.
 const CANVAS: u32 = 0x111014;
 const SURFACE: u32 = 0x1b1b1f;
@@ -658,6 +666,8 @@ struct HeadphoneApp {
     detail_page: DetailPage,
     #[cfg(target_os = "linux")]
     _media_bridge: Option<MediaBridge>,
+    #[cfg(target_os = "macos")]
+    menu_bar: Option<MacMenuBar>,
 }
 
 impl HeadphoneApp {
@@ -720,6 +730,8 @@ impl HeadphoneApp {
             detail_page,
             #[cfg(target_os = "linux")]
             _media_bridge: None,
+            #[cfg(target_os = "macos")]
+            menu_bar: None,
         }
     }
 
@@ -821,6 +833,33 @@ impl HeadphoneApp {
                     }
                     (Language::SimplifiedChinese, BluetoothDevice::AirPods) => {
                         "正在查找已连接的 AirPods…".into()
+                    }
+                };
+            }
+            BluetoothEvent::Detected { device: kind, name } => {
+                let index = if let Some(index) = self.device_index(kind) {
+                    index
+                } else {
+                    let was_empty = self.devices.is_empty();
+                    let mut device = match kind {
+                        BluetoothDevice::SonyWh1000Xm5 => sony_wh1000xm5(false),
+                        BluetoothDevice::AirPods => airpods(false),
+                    };
+                    device.battery_percent = 0;
+                    self.devices.push(device);
+                    let index = self.devices.len() - 1;
+                    if was_empty {
+                        self.selected = index;
+                    }
+                    index
+                };
+                self.devices[index].connected = true;
+                self.backend_status = match self.language {
+                    Language::English => {
+                        format!("{name} is connected; opening hardware controls…")
+                    }
+                    Language::SimplifiedChinese => {
+                        format!("{name} 已由 macOS 连接；正在打开硬件控制…")
                     }
                 };
             }
@@ -1092,6 +1131,190 @@ impl HeadphoneApp {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        self.sync_menu_bar();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn menu_bar_snapshot(&self) -> MenuBarSnapshot {
+        let language = match self.language {
+            Language::English => MenuBarLanguage::English,
+            Language::SimplifiedChinese => MenuBarLanguage::SimplifiedChinese,
+        };
+        let device = self
+            .devices
+            .iter()
+            .find(|device| device.connected)
+            .or_else(|| self.devices.get(self.selected))
+            .map(|device| {
+                let battery_percent = device.connected.then_some(device.battery_percent);
+                MenuBarDevice {
+                    kind: device.kind,
+                    name: self.device_name(device).to_owned(),
+                    connected: device.connected,
+                    battery_percent,
+                    codec: (device.kind == DeviceKind::SonyWh1000Xm5)
+                        .then(|| self.sony.codec.clone())
+                        .flatten(),
+                    noise_mode: device.noise_mode,
+                    noise_modes: device.capabilities.noise_modes.clone(),
+                    dsee_enabled: device.dsee_enabled,
+                    speak_to_chat: device.speak_to_chat,
+                    pause_when_taken_off: match device.kind {
+                        DeviceKind::SonyWh1000Xm5 => self.sony.pause_when_taken_off,
+                        DeviceKind::AirPods => self.airpods.ear_detection,
+                    },
+                    equalizer_preset: self.sony.equalizer.map(|eq| eq.preset),
+                    equalizer_choices: EqPreset::CHOICES
+                        .into_iter()
+                        .map(|preset| (preset, self.preset_label(preset).to_owned()))
+                        .collect(),
+                    connected_devices: self.sony.connected_devices.clone(),
+                    multipoint_summary: match device.kind {
+                        DeviceKind::SonyWh1000Xm5 if self.sony.connected_devices.is_empty() => {
+                            self.t("No devices", "暂无设备").to_owned()
+                        }
+                        DeviceKind::SonyWh1000Xm5 => format!(
+                            "{} {}",
+                            self.sony.connected_devices.len(),
+                            self.t("devices", "台设备")
+                        ),
+                        DeviceKind::AirPods => self.t("Apple devices", "Apple 设备").to_owned(),
+                    },
+                    equalizer_summary: match device.kind {
+                        DeviceKind::SonyWh1000Xm5 => self
+                            .sony
+                            .equalizer
+                            .map(|equalizer| self.preset_label(equalizer.preset).to_owned())
+                            .unwrap_or_else(|| self.t("Not reported", "尚未读取").to_owned()),
+                        DeviceKind::AirPods => self.t("System audio", "系统音频").to_owned(),
+                    },
+                }
+            });
+        MenuBarSnapshot { language, device }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sync_menu_bar(&mut self) {
+        let snapshot = self.menu_bar_snapshot();
+        if let Some(menu_bar) = self.menu_bar.as_mut() {
+            menu_bar.update(&snapshot);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_noise_mode_from_menu_bar(&mut self, mode: NoiseMode) {
+        let Some(index) = self
+            .devices
+            .iter()
+            .position(|device| device.connected && device.capabilities.noise_modes.contains(&mode))
+        else {
+            return;
+        };
+        let kind = self.devices[index].kind;
+        self.devices[index].noise_mode = mode;
+        match kind {
+            DeviceKind::SonyWh1000Xm5 => {
+                let mode = match mode {
+                    NoiseMode::Off => ListeningMode::Off,
+                    NoiseMode::NoiseCancelling => ListeningMode::NoiseCancelling,
+                    NoiseMode::Ambient => ListeningMode::Ambient,
+                    NoiseMode::Transparency | NoiseMode::Adaptive => return,
+                };
+                self.send_setting(Setting::Mode(mode));
+            }
+            DeviceKind::AirPods => {
+                let mode = match mode {
+                    NoiseMode::Off => AirPodsListeningMode::Off,
+                    NoiseMode::NoiseCancelling => AirPodsListeningMode::NoiseCancelling,
+                    NoiseMode::Transparency => AirPodsListeningMode::Transparency,
+                    NoiseMode::Adaptive => AirPodsListeningMode::Adaptive,
+                    NoiseMode::Ambient => return,
+                };
+                self.send_airpods_setting(AirPodsSetting::Mode(mode));
+            }
+        }
+        self.sync_menu_bar();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_smart_feature_from_menu_bar(&mut self, feature: SmartFeature, enabled: bool) {
+        let Some(index) = self.devices.iter().position(|device| device.connected) else {
+            return;
+        };
+        match (self.devices[index].kind, feature) {
+            (DeviceKind::SonyWh1000Xm5, SmartFeature::Dsee) => {
+                self.devices[index].dsee_enabled = enabled;
+                self.send_setting(Setting::Feature(Feature::Dsee, enabled));
+            }
+            (DeviceKind::SonyWh1000Xm5, SmartFeature::SpeakToChat) => {
+                self.devices[index].speak_to_chat = enabled;
+                self.send_setting(Setting::Feature(Feature::SpeakToChat, enabled));
+            }
+            (DeviceKind::SonyWh1000Xm5, SmartFeature::PauseWhenTakenOff) => {
+                self.sony.pause_when_taken_off = enabled;
+                self.send_setting(Setting::Feature(Feature::PauseWhenTakenOff, enabled));
+            }
+            (DeviceKind::AirPods, SmartFeature::PauseWhenTakenOff) => {
+                self.airpods.ear_detection = enabled;
+                self.send_airpods_setting(AirPodsSetting::EarDetection(enabled));
+            }
+            _ => return,
+        }
+        self.sync_menu_bar();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_equalizer_from_menu_bar(&mut self, preset: EqPreset) {
+        let Some(index) = self
+            .device_index(BluetoothDevice::SonyWh1000Xm5)
+            .filter(|index| self.devices[*index].connected)
+        else {
+            return;
+        };
+        if !EqPreset::CHOICES.contains(&preset) {
+            return;
+        }
+        self.sony
+            .equalizer
+            .get_or_insert(Equalizer {
+                preset,
+                bands: [0; 6],
+            })
+            .preset = preset;
+        self.devices[index].equalizer_enabled = preset != EqPreset::Off;
+        self.send_setting(Setting::EqualizerPreset(preset));
+        if let Some(menu) = self.menu_bar.as_mut() {
+            menu.collapse_section();
+        }
+        self.sync_menu_bar();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_playback_from_menu_bar(&mut self, id: &str) {
+        if !self
+            .devices
+            .iter()
+            .any(|device| device.kind == DeviceKind::SonyWh1000Xm5 && device.connected)
+            || !self
+                .sony
+                .connected_devices
+                .iter()
+                .any(|device| device.id == id && !device.playing)
+        {
+            return;
+        }
+        self.send_setting(Setting::PlayFrom(id.to_owned()));
+        if let Some(menu) = self.menu_bar.as_mut() {
+            menu.collapse_section();
+        }
+        // In hardware mode, the playing indicator follows the headset's reply.
+        if self.requests.is_none() {
+            for device in &mut self.sony.connected_devices {
+                device.playing = device.id == id;
+            }
+        }
+        self.sync_menu_bar();
     }
 
     fn chip(text: impl Into<SharedString>, color: u32) -> impl IntoElement {
@@ -2955,6 +3178,8 @@ impl HeadphoneApp {
         } else {
             self.t("Searching for headphones…", "正在查找耳机…").into()
         };
+        #[cfg(target_os = "macos")]
+        self.sync_menu_bar();
     }
 
     fn empty_devices_view(&self) -> impl IntoElement {
@@ -3341,12 +3566,34 @@ impl Render for HeadphoneApp {
     }
 }
 
+fn main_window_options(cx: &App) -> WindowOptions {
+    let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        app_id: Some(APP_ID.into()),
+        icon: window_icon(),
+        ..Default::default()
+    }
+}
+
+fn open_or_activate_main_window(app: Entity<HeadphoneApp>, cx: &mut App) {
+    if let Some(window) = cx.windows().first().copied() {
+        cx.activate(true);
+        let _ = window.update(cx, |_, window, _| window.activate_window());
+        return;
+    }
+
+    gpui_kit::open_window(main_window_options(cx), cx, |_, _| app)
+        .expect("failed to open iHeadphone window");
+    #[cfg(target_os = "macos")]
+    cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
+}
+
 fn main() {
     gpui_kit::application()
         .with_assets(AppIcons)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
-            let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
             let demo = std::env::var_os("IHEADPHONE_DEMO").is_some();
             let (requests, events) = if demo {
                 (None, None)
@@ -3354,14 +3601,19 @@ fn main() {
                 let link = iheadphone_transport::start(Some("WH-1000XM5".into()));
                 (Some(link.requests), Some(link.events))
             };
+            #[cfg(target_os = "macos")]
+            let (menu_actions, menu_events) = async_channel::unbounded();
             let app: Entity<HeadphoneApp> = cx.new(|_| {
-                let app = HeadphoneApp::new(requests);
+                let mut app = HeadphoneApp::new(requests);
                 #[cfg(target_os = "linux")]
-                let app = {
-                    let mut app = app;
+                {
                     app._media_bridge = Some(MediaBridge::start());
-                    app
-                };
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    app.menu_bar = Some(MacMenuBar::new(menu_actions));
+                    app.sync_menu_bar();
+                }
                 app
             });
 
@@ -3378,17 +3630,77 @@ fn main() {
                 .detach();
             }
 
-            gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    app_id: Some(APP_ID.into()),
-                    icon: window_icon(),
-                    ..Default::default()
-                },
-                cx,
-                |_, _| app,
-            )
-            .expect("failed to open iHeadphone window");
+            #[cfg(target_os = "macos")]
+            {
+                let model = app.clone();
+                cx.spawn(async move |cx| {
+                    while let Ok(action) = menu_events.recv().await {
+                        match action {
+                            MenuBarAction::Open => {
+                                let model = model.clone();
+                                cx.update(|cx| open_or_activate_main_window(model, cx));
+                            }
+                            MenuBarAction::SetVolume(volume) => {
+                                std::thread::spawn(move || set_output_volume(volume));
+                            }
+                            MenuBarAction::SetNoiseMode(mode) => {
+                                model.update(cx, |app, cx| {
+                                    app.set_noise_mode_from_menu_bar(mode);
+                                    cx.notify();
+                                });
+                            }
+                            MenuBarAction::SetSmartFeature(feature, enabled) => {
+                                model.update(cx, |app, cx| {
+                                    app.set_smart_feature_from_menu_bar(feature, enabled);
+                                    cx.notify();
+                                });
+                            }
+                            MenuBarAction::ToggleSection(section) => {
+                                model.update(cx, |app, _| {
+                                    let snapshot = app.menu_bar_snapshot();
+                                    if let Some(menu) = app.menu_bar.as_mut() {
+                                        menu.toggle_section(section, &snapshot);
+                                    }
+                                });
+                            }
+                            MenuBarAction::SetEqualizer(preset) => {
+                                model.update(cx, |app, cx| {
+                                    app.set_equalizer_from_menu_bar(preset);
+                                    cx.notify();
+                                });
+                            }
+                            MenuBarAction::PlayFrom(id) => {
+                                model.update(cx, |app, cx| {
+                                    app.set_playback_from_menu_bar(&id);
+                                    cx.notify();
+                                });
+                            }
+                            MenuBarAction::Quit => cx.update(|cx| cx.quit()),
+                        }
+                    }
+                })
+                .detach();
+            }
+
+            #[cfg(target_os = "macos")]
+            let menu_preview = app.clone();
+            if !(cfg!(target_os = "macos")
+                && demo
+                && std::env::var_os("IHEADPHONE_MENU_PREVIEW_WINDOW").is_some())
+            {
+                open_or_activate_main_window(app, cx);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
+                if std::env::var_os("IHEADPHONE_OPEN_POPOVER").is_some() {
+                    menu_preview.update(cx, |app, _| {
+                        if let Some(menu_bar) = app.menu_bar.as_ref() {
+                            menu_bar.show();
+                        }
+                    });
+                }
+            }
         });
 }
 
@@ -3443,6 +3755,30 @@ mod tests {
         assert_eq!(app.devices.len(), 1);
         assert_eq!(app.devices[0].kind, DeviceKind::SonyWh1000Xm5);
         assert!(app.devices[0].connected);
+    }
+
+    #[test]
+    fn detected_macos_headset_appears_before_control_channel_is_ready() {
+        let (requests, _) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+        app.language = Language::English;
+
+        app.apply_bluetooth_event(BluetoothEvent::Detected {
+            device: BluetoothDevice::SonyWh1000Xm5,
+            name: "WH-1000XM5".into(),
+        });
+
+        assert_eq!(app.devices.len(), 1);
+        assert!(app.devices[0].connected);
+        assert!(app.backend_status.contains("opening hardware controls"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            app.menu_bar_snapshot()
+                .device
+                .expect("detected headset")
+                .name,
+            "WH-1000XM5"
+        );
     }
 
     #[test]
@@ -3622,6 +3958,94 @@ mod tests {
         assert_eq!(app.t("Settings", "设置"), "设置");
         assert_eq!(app.noise_mode_label(NoiseMode::Ambient), "环境声");
         assert_eq!(app.preset_label(EqPreset::BassBoost), "低音增强");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_bar_snapshot_uses_live_device_state() {
+        let mut app = HeadphoneApp::new(None);
+        app.language = Language::English;
+        app.sony.wearing_status = Some(WearingStatus::Normal);
+        let snapshot = app.menu_bar_snapshot();
+        let device = snapshot.device.expect("preview device");
+
+        assert_eq!(device.name, "WH-1000XM5");
+        assert_eq!(device.battery_percent, Some(87));
+        assert_eq!(device.codec.as_deref(), Some("LDAC"));
+        assert!(device.pause_when_taken_off);
+        assert_eq!(device.multipoint_summary, "2 devices");
+        assert_eq!(device.equalizer_summary, "Custom 1");
+        assert!(device.noise_modes.contains(&NoiseMode::NoiseCancelling));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_bar_equalizer_sends_preset_and_updates_selection() {
+        let (requests, receiver) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+        app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::SonyWh1000Xm5,
+            name: "WH-1000XM5".into(),
+        });
+        app.set_equalizer_from_menu_bar(EqPreset::Bright);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(BluetoothRequest::Sony(Setting::EqualizerPreset(
+                EqPreset::Bright
+            )))
+        ));
+        assert_eq!(
+            app.menu_bar_snapshot().device.unwrap().equalizer_preset,
+            Some(EqPreset::Bright)
+        );
+        app.set_equalizer_from_menu_bar(EqPreset::Unknown(255));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_bar_playback_validates_device_and_waits_for_hardware_state() {
+        let (requests, receiver) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+        app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::SonyWh1000Xm5,
+            name: "WH-1000XM5".into(),
+        });
+        app.sony.connected_devices = vec![ConnectedDevice {
+            id: "AA:BB:CC:DD:EE:FF".into(),
+            name: "Phone".into(),
+            playing: false,
+        }];
+        app.set_playback_from_menu_bar("stale-device");
+        assert!(receiver.try_recv().is_err());
+        app.set_playback_from_menu_bar("AA:BB:CC:DD:EE:FF");
+        assert!(
+            matches!(receiver.try_recv(), Ok(BluetoothRequest::Sony(Setting::PlayFrom(id))) if id == "AA:BB:CC:DD:EE:FF")
+        );
+        assert!(!app.sony.connected_devices[0].playing);
+        app.devices[0].connected = false;
+        app.set_playback_from_menu_bar("AA:BB:CC:DD:EE:FF");
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_bar_noise_control_uses_the_existing_request_channel() {
+        let (requests, receiver) = mpsc::channel();
+        let mut app = HeadphoneApp::new(Some(requests));
+        app.apply_bluetooth_event(BluetoothEvent::Connected {
+            device: BluetoothDevice::SonyWh1000Xm5,
+            name: "WH-1000XM5".into(),
+        });
+
+        app.set_noise_mode_from_menu_bar(NoiseMode::Ambient);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(BluetoothRequest::Sony(Setting::Mode(
+                ListeningMode::Ambient
+            )))
+        ));
     }
 
     #[cfg(target_os = "linux")]
