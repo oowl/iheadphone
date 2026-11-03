@@ -283,9 +283,37 @@ fn send_desktop_notification(_device: BluetoothDevice, _title: &str, _body: &str
 #[cfg(target_os = "linux")]
 struct MediaBridge {
     paused_players: Vec<String>,
-    speak_to_chat_active: bool,
-    taken_off_active: bool,
+    pause_reasons: PauseReasons,
     volume_duck: Option<VolumeDuck>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct PauseReasons {
+    speak_to_chat: bool,
+    sony_taken_off: bool,
+    airpods_taken_off: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl PauseReasons {
+    fn set_taken_off(&mut self, device: BluetoothDevice, active: bool) {
+        match device {
+            BluetoothDevice::SonyWh1000Xm5 => self.sony_taken_off = active,
+            BluetoothDevice::AirPods => self.airpods_taken_off = active,
+        }
+    }
+
+    fn clear_device(&mut self, device: BluetoothDevice) {
+        self.set_taken_off(device, false);
+        if device == BluetoothDevice::SonyWh1000Xm5 {
+            self.speak_to_chat = false;
+        }
+    }
+
+    fn should_pause(&self) -> bool {
+        self.speak_to_chat || self.sony_taken_off || self.airpods_taken_off
+    }
 }
 
 /// Media volume lowered while the wearer speaks.
@@ -334,8 +362,7 @@ impl MediaBridge {
         }
         Self {
             paused_players: Vec::new(),
-            speak_to_chat_active: false,
-            taken_off_active: false,
+            pause_reasons: PauseReasons::default(),
             volume_duck: None,
         }
     }
@@ -419,25 +446,24 @@ impl MediaBridge {
 
     fn set_speak_to_chat_active(&mut self, active: bool) {
         let was_pausing = self.should_pause();
-        self.speak_to_chat_active = active;
+        self.pause_reasons.speak_to_chat = active;
         self.apply_pause_transition(was_pausing);
     }
 
-    fn set_taken_off_active(&mut self, active: bool) {
+    fn set_taken_off_active(&mut self, device: BluetoothDevice, active: bool) {
         let was_pausing = self.should_pause();
-        self.taken_off_active = active;
+        self.pause_reasons.set_taken_off(device, active);
         self.apply_pause_transition(was_pausing);
     }
 
-    fn clear_pause_reasons(&mut self) {
+    fn clear_pause_reasons_for(&mut self, device: BluetoothDevice) {
         let was_pausing = self.should_pause();
-        self.speak_to_chat_active = false;
-        self.taken_off_active = false;
+        self.pause_reasons.clear_device(device);
         self.apply_pause_transition(was_pausing);
     }
 
     fn should_pause(&self) -> bool {
-        self.speak_to_chat_active || self.taken_off_active
+        self.pause_reasons.should_pause()
     }
 
     fn apply_pause_transition(&mut self, was_pausing: bool) {
@@ -997,10 +1023,15 @@ impl HeadphoneApp {
             (DeviceKind::SonyWh1000Xm5, TrayFeature::PauseWhenTakenOff) => {
                 self.sony.pause_when_taken_off = enabled;
                 self.send_setting(Setting::Feature(Feature::PauseWhenTakenOff, enabled));
-                if let (Some(bridge), Some(status)) =
-                    (self._media_bridge.as_mut(), self.sony.wearing_status)
-                {
-                    bridge.set_taken_off_active(enabled && status.is_taken_off());
+                if let Some(bridge) = self._media_bridge.as_mut() {
+                    bridge.set_taken_off_active(
+                        BluetoothDevice::SonyWh1000Xm5,
+                        enabled
+                            && self
+                                .sony
+                                .wearing_status
+                                .is_some_and(|status| status.is_taken_off()),
+                    );
                 }
             }
             (DeviceKind::AirPods, TrayFeature::PauseWhenTakenOff)
@@ -1008,10 +1039,15 @@ impl HeadphoneApp {
             {
                 self.airpods.ear_detection = enabled;
                 self.send_airpods_setting(AirPodsSetting::EarDetection(enabled));
-                if let (Some(bridge), Some(wearing)) =
-                    (self._media_bridge.as_mut(), self.airpods.wearing)
-                {
-                    bridge.set_taken_off_active(enabled && !wearing.any_in_ear());
+                if let Some(bridge) = self._media_bridge.as_mut() {
+                    bridge.set_taken_off_active(
+                        BluetoothDevice::AirPods,
+                        enabled
+                            && self
+                                .airpods
+                                .wearing
+                                .is_some_and(|wearing| !wearing.any_in_ear()),
+                    );
                 }
             }
             (DeviceKind::AirPods, TrayFeature::ConversationAwareness)
@@ -1216,8 +1252,10 @@ impl HeadphoneApp {
                 }
                 #[cfg(target_os = "linux")]
                 if let Some(bridge) = self._media_bridge.as_mut() {
-                    bridge.clear_pause_reasons();
-                    bridge.end_conversation();
+                    bridge.clear_pause_reasons_for(kind);
+                    if kind == BluetoothDevice::AirPods {
+                        bridge.end_conversation();
+                    }
                 }
                 if was_connected {
                     let name = match kind {
@@ -1308,10 +1346,15 @@ impl HeadphoneApp {
                     Update::Feature(Feature::PauseWhenTakenOff, enabled) => {
                         self.sony.pause_when_taken_off = enabled;
                         #[cfg(target_os = "linux")]
-                        if let (Some(bridge), Some(status)) =
-                            (self._media_bridge.as_mut(), self.sony.wearing_status)
-                        {
-                            bridge.set_taken_off_active(enabled && status.is_taken_off());
+                        if let Some(bridge) = self._media_bridge.as_mut() {
+                            bridge.set_taken_off_active(
+                                BluetoothDevice::SonyWh1000Xm5,
+                                enabled
+                                    && self
+                                        .sony
+                                        .wearing_status
+                                        .is_some_and(|status| status.is_taken_off()),
+                            );
                         }
                     }
                     Update::Equalizer(equalizer) => {
@@ -1342,7 +1385,7 @@ impl HeadphoneApp {
                         let taken_off = self.sony.pause_when_taken_off && status.is_taken_off();
                         #[cfg(target_os = "linux")]
                         if let Some(bridge) = self._media_bridge.as_mut() {
-                            bridge.set_taken_off_active(taken_off);
+                            bridge.set_taken_off_active(BluetoothDevice::SonyWh1000Xm5, taken_off);
                         }
                         self.backend_status = if taken_off {
                             self.t(
@@ -1393,7 +1436,7 @@ impl HeadphoneApp {
                         let taken_off = self.airpods.ear_detection && !wearing.any_in_ear();
                         #[cfg(target_os = "linux")]
                         if let Some(bridge) = self._media_bridge.as_mut() {
-                            bridge.set_taken_off_active(taken_off);
+                            bridge.set_taken_off_active(BluetoothDevice::AirPods, taken_off);
                         }
                         self.backend_status = if taken_off {
                             self.t(
@@ -1411,6 +1454,17 @@ impl HeadphoneApp {
                     }
                     AirPodsUpdate::EarDetection(enabled) => {
                         self.airpods.ear_detection = enabled;
+                        #[cfg(target_os = "linux")]
+                        if let Some(bridge) = self._media_bridge.as_mut() {
+                            bridge.set_taken_off_active(
+                                BluetoothDevice::AirPods,
+                                enabled
+                                    && self
+                                        .airpods
+                                        .wearing
+                                        .is_some_and(|wearing| !wearing.any_in_ear()),
+                            );
+                        }
                     }
                     AirPodsUpdate::OneBudNoiseCancelling(enabled) => {
                         self.airpods.one_bud_anc = enabled;
@@ -3146,6 +3200,10 @@ impl HeadphoneApp {
                     this.devices[index].equalizer_enabled = true;
                 }
                 this.send_setting(Setting::EqualizerBands(equalizer.bands));
+                #[cfg(target_os = "linux")]
+                this.refresh_tray();
+                #[cfg(target_os = "macos")]
+                this.sync_menu_bar();
                 cx.notify();
             }))
             .child(if delta < 0 { "−" } else { "+" })
@@ -3763,6 +3821,17 @@ impl Render for HeadphoneApp {
                     let enabled = !this.sony.pause_when_taken_off;
                     this.sony.pause_when_taken_off = enabled;
                     this.send_setting(Setting::Feature(Feature::PauseWhenTakenOff, enabled));
+                    #[cfg(target_os = "linux")]
+                    if let Some(bridge) = this._media_bridge.as_mut() {
+                        bridge.set_taken_off_active(
+                            BluetoothDevice::SonyWh1000Xm5,
+                            enabled
+                                && this
+                                    .sony
+                                    .wearing_status
+                                    .is_some_and(|status| status.is_taken_off()),
+                        );
+                    }
                 },
                 cx,
             ));
@@ -3798,6 +3867,17 @@ impl Render for HeadphoneApp {
                     let enabled = !this.airpods.ear_detection;
                     this.airpods.ear_detection = enabled;
                     this.send_airpods_setting(AirPodsSetting::EarDetection(enabled));
+                    #[cfg(target_os = "linux")]
+                    if let Some(bridge) = this._media_bridge.as_mut() {
+                        bridge.set_taken_off_active(
+                            BluetoothDevice::AirPods,
+                            enabled
+                                && this
+                                    .airpods
+                                    .wearing
+                                    .is_some_and(|wearing| !wearing.any_in_ear()),
+                        );
+                    }
                 },
                 cx,
             ));
@@ -4155,6 +4235,16 @@ fn main() {
                                 cx.update(|cx| match command {
                                     TrayCommand::Open => {
                                         open_or_activate_main_window(model.clone(), cx);
+                                    }
+                                    TrayCommand::Available(available) => {
+                                        if available {
+                                            cx.set_quit_mode(QuitMode::Explicit);
+                                        } else {
+                                            if cx.windows().is_empty() {
+                                                open_or_activate_main_window(model.clone(), cx);
+                                            }
+                                            cx.set_quit_mode(QuitMode::LastWindowClosed);
+                                        }
                                     }
                                     TrayCommand::SetMode(kind, mode) => {
                                         model.update(cx, |app, cx| {
@@ -4532,6 +4622,44 @@ mod tests {
         assert!(easing.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(speaking < easing[0] && easing[3] < 80);
         assert_eq!(conversation_volume(80, AirPodsConversation::Ended), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_headset_keeps_its_own_media_pause_reason() {
+        let mut app = HeadphoneApp::new(None);
+        app._media_bridge = Some(MediaBridge {
+            paused_players: Vec::new(),
+            pause_reasons: PauseReasons {
+                sony_taken_off: true,
+                airpods_taken_off: true,
+                ..PauseReasons::default()
+            },
+            volume_duck: None,
+        });
+
+        app.set_tray_feature(
+            DeviceKind::SonyWh1000Xm5,
+            TrayFeature::PauseWhenTakenOff,
+            false,
+        );
+        let reasons = &app._media_bridge.as_ref().unwrap().pause_reasons;
+        assert!(!reasons.sony_taken_off);
+        assert!(reasons.airpods_taken_off);
+        assert!(reasons.should_pause());
+
+        app.apply_bluetooth_event(BluetoothEvent::Disconnected(BluetoothDevice::SonyWh1000Xm5));
+        assert!(app._media_bridge.as_ref().unwrap().should_pause());
+
+        app.set_tray_feature(DeviceKind::AirPods, TrayFeature::PauseWhenTakenOff, false);
+        assert!(!app._media_bridge.as_ref().unwrap().should_pause());
+
+        let reasons = &mut app._media_bridge.as_mut().unwrap().pause_reasons;
+        reasons.sony_taken_off = true;
+        reasons.airpods_taken_off = true;
+        reasons.clear_device(BluetoothDevice::AirPods);
+        assert!(reasons.should_pause());
+        assert!(reasons.sony_taken_off);
     }
 
     #[cfg(target_os = "linux")]

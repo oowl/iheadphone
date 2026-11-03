@@ -5,7 +5,7 @@ use iheadphone_airpods_protocol::{BatteryState as AirPodsBattery, PodState};
 use iheadphone_domain::{DeviceKind, NoiseMode};
 use iheadphone_sony_protocol::{ConnectedDevice, EqPreset, WearingStatus};
 use ksni::{
-    Category, Icon, MenuItem, ToolTip, Tray,
+    Category, Icon, MenuItem, OfflineReason, ToolTip, Tray,
     menu::{CheckmarkItem, StandardItem, SubMenu},
 };
 
@@ -67,6 +67,7 @@ pub enum TrayFeature {
 pub enum TrayCommand {
     Open,
     Quit,
+    Available(bool),
     SetMode(DeviceKind, NoiseMode),
     SetFeature(DeviceKind, TrayFeature, bool),
     SetEqualizer(EqPreset),
@@ -147,6 +148,15 @@ impl HeadphoneTray {
 
 impl Tray for HeadphoneTray {
     const MENU_ON_ACTIVATE: bool = true;
+
+    fn watcher_online(&self) {
+        let _ = self.commands.try_send(TrayCommand::Available(true));
+    }
+
+    fn watcher_offline(&self, _reason: OfflineReason) -> bool {
+        let _ = self.commands.try_send(TrayCommand::Available(false));
+        true
+    }
 
     fn id(&self) -> String {
         APP_ID.into()
@@ -470,6 +480,17 @@ fn mode_label(mode: NoiseMode, chinese: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_tray_watcher_availability() {
+        let (commands, receiver) = async_channel::unbounded();
+        let tray = HeadphoneTray::new(TraySnapshot::default(), commands);
+
+        assert!(tray.watcher_offline(OfflineReason::No));
+        assert_eq!(receiver.try_recv(), Ok(TrayCommand::Available(false)));
+        tray.watcher_online();
+        assert_eq!(receiver.try_recv(), Ok(TrayCommand::Available(true)));
+    }
 
     #[test]
     fn tray_menu_exposes_battery_and_sends_quick_mode_command() {
