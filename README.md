@@ -196,6 +196,21 @@ cargo test --workspace
 cargo check --workspace
 ```
 
+### Linux panel widget (KDE Plasma and GNOME)
+
+While iHeadphone is running, its status icon appears in KDE Plasma's system tray. Click it to see
+device status and quick controls. For Sony headphones the menu shows battery, wearing state, codec,
+noise control, DSEE, Speak-to-Chat, wear-sensor pause, equalizer presets and multipoint audio
+sources. For AirPods it shows separate left, right and case batteries with charging and wearing
+state, noise control, ear detection, Conversation Awareness and Personalized Volume where supported.
+Closing the full window keeps the Bluetooth connection and status icon running; use
+**Quit** in the tray menu to stop the app.
+
+GNOME Shell needs a StatusNotifierItem host such as the
+[AppIndicator and KStatusNotifierItem Support extension](https://extensions.gnome.org/extension/615/appindicator-support/)
+to show the same icon in its top bar. If no tray host is available, iHeadphone runs as a normal
+window and closing it exits the app.
+
 ### Wayland desktop icon
 
 Wayland compositors resolve the window icon through the application's desktop ID rather than the
